@@ -18,7 +18,6 @@
  */
 
 #include "wivrn_session.h"
-
 #include "accept_connection.h"
 #include "driver/xrt_cast.h"
 #include "main/comp_compositor.h"
@@ -50,6 +49,9 @@
 
 #if WIVRN_FEATURE_SOLARXR
 #include "solarxr_device.h"
+#endif
+#if WIVRN_FEATURE_KINECT
+#include "kinect_device.h"
 #endif
 
 namespace wivrn
@@ -214,6 +216,18 @@ wivrn::wivrn_session::wivrn_session(wivrn::TCP && tcp, u_system & system) :
 			static_roles.body = solar_devs[i];
 	}
 #endif
+
+#if WIVRN_FEATURE_KINECT
+
+	const uint32_t count = kinect_device_create_xdevs(&hmd, &xdevs[xdev_count], XRT_SYSTEM_MAX_DEVICES - xdev_count);
+
+	if (count != 0) {
+		static_roles.body = xdevs[xdev_count];
+	}
+
+	xdev_count += count;
+#endif
+
 
 	if (roles.left >= 0)
 		roles.left_profile = xdevs[roles.left]->name;

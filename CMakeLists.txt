@@ -41,6 +41,7 @@ auto_option(WIVRN_USE_PULSEAUDIO "Enable pulseaudio backend" AUTO)
 option(WIVRN_FEATURE_RENDERDOC "Support renderdoc" OFF)
 option(WIVRN_FEATURE_SOLARXR "Enable SolarXR driver" OFF)
 option(WIVRN_FEATURE_STEAMVR_LIGHTHOUSE "Enable SteamVR Lighthouse driver" OFF)
+option(WIVRN_FEATURE_Kinect "Enable Kinect driver" ON)
 
 option(WIVRN_CHECK_CAPSYSNICE "Check if CAP_SYS_NICE is available at startup" ON)
 
