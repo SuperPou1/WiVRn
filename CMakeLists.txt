@@ -45,6 +45,7 @@ set(OPENCOMPOSITE_SEARCH_PATH "/usr/local/lib/OpenComposite:/usr/lib/OpenComposi
 option(WIVRN_FEATURE_RENDERDOC "Support renderdoc" OFF)
 option(WIVRN_FEATURE_SOLARXR "Enable SolarXR driver" OFF)
 option(WIVRN_FEATURE_STEAMVR_LIGHTHOUSE "Enable SteamVR Lighthouse driver" OFF)
+option(WIVRN_FEATURE_Kinect "Enable Kinect driver" ON)
 
 option(WIVRN_CHECK_CAPSYSNICE "Check if CAP_SYS_NICE is available at startup" ON)
 set(WIVRN_CSS "${CMAKE_SOURCE_DIR}/images/wivrn-local.css" CACHE STRING "Stylesheet to use to render SVGs" )
