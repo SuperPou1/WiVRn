@@ -353,7 +353,7 @@ index 000000000..b2426c117
 +	u_device_free(&dev->base);
 +}
 +
-+static void
++static xrt_result_t
 +kinect_get_tracked_pose(struct xrt_device *xdev,
 +                        enum xrt_input_name name,
 +                        int64_t at_timestamp_ns,
@@ -448,7 +448,7 @@ index 000000000..b2426c117
 +
 +// }
 +
-+static void
++static xrt_result_t
 +kinect_joint_get_tracked_pose(struct xrt_device *xdev,
 +                              enum xrt_input_name name,
 +                              int64_t at_timestamp_ns,
