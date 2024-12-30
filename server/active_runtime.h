@@ -26,8 +26,8 @@ namespace wivrn
 
 class active_runtime
 {
-	bool to_be_deleted = false;
 	std::filesystem::path active_runtime_json;
+	std::filesystem::path openvr_manifest;
 	pid_t pid;
 
 public:
@@ -37,5 +37,6 @@ public:
 	~active_runtime();
 
 	static std::filesystem::path manifest_path();
+	static std::filesystem::path opencomposite_path();
 };
 } // namespace wivrn

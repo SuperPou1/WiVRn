@@ -17,10 +17,22 @@
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
 
-#include "version.h"
+#pragma once
 
-namespace wivrn
+#include "crypto.h"
+#include <array>
+#include <cstdint>
+#include <string>
+
+struct secrets
 {
-const char git_version[] = "@GIT_DESC@";
-const char git_commit[] = "@GIT_COMMIT@";
-} // namespace wivrn
+	std::array<std::uint8_t, 16> control_key;
+	std::array<std::uint8_t, 16> control_iv_to_headset;
+	std::array<std::uint8_t, 16> control_iv_from_headset;
+
+	std::array<std::uint8_t, 16> stream_key;
+	std::array<std::uint8_t, 8> stream_iv_header_to_headset;
+	std::array<std::uint8_t, 8> stream_iv_header_from_headset;
+
+	secrets(crypto::key & my_key, crypto::key & peer_key, const std::string & pin);
+};

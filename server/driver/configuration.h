@@ -29,7 +29,6 @@
 
 namespace wivrn
 {
-
 struct configuration
 {
 	struct encoder
@@ -46,6 +45,7 @@ struct configuration
 	};
 
 	std::vector<encoder> encoders;
+	std::optional<encoder> encoder_passthrough;
 	std::optional<int> bitrate;
 	std::optional<std::array<double, 2>> scale;
 	std::vector<std::string> application;
@@ -57,4 +57,16 @@ struct configuration
 };
 
 std::string server_cookie();
+
+struct headset_key
+{
+	std::string public_key;
+	std::string name;
+};
+
+std::vector<headset_key> known_keys();
+void add_known_key(headset_key key);
+void remove_known_key(const std::string & key);
+void rename_known_key(headset_key key);
+
 } // namespace wivrn

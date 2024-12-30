@@ -46,7 +46,7 @@
 namespace wivrn
 {
 
-VideoEncoder::sender::sender() :
+video_encoder::sender::sender() :
         thread([this](std::stop_token t) {
 	        while (not t.stop_requested())
 	        {
@@ -73,34 +73,34 @@ VideoEncoder::sender::sender() :
 {
 }
 
-void VideoEncoder::sender::push(data && d)
+void video_encoder::sender::push(data && d)
 {
 	std::unique_lock lock(mutex);
 	pending.push_back(std::move(d));
 	cv.notify_all();
 }
 
-void VideoEncoder::sender::wait_idle(VideoEncoder * encoder)
+void video_encoder::sender::wait_idle(video_encoder * encoder)
 {
 	std::unique_lock lock(mutex);
 	while (std::ranges::any_of(pending, [=](auto & data) { return data.encoder == encoder; }))
 		cv.wait_for(lock, std::chrono::milliseconds(100));
 }
 
-std::shared_ptr<VideoEncoder::sender> VideoEncoder::sender::get()
+std::shared_ptr<video_encoder::sender> video_encoder::sender::get()
 {
-	static std::weak_ptr<VideoEncoder::sender> instance;
+	static std::weak_ptr<video_encoder::sender> instance;
 	static std::mutex m;
 	std::unique_lock lock(m);
 	auto s = instance.lock();
 	if (s)
 		return s;
-	s.reset(new VideoEncoder::sender());
+	s.reset(new video_encoder::sender());
 	instance = s;
 	return s;
 }
 
-std::unique_ptr<VideoEncoder> VideoEncoder::Create(
+std::unique_ptr<video_encoder> video_encoder::create(
         wivrn_vk_bundle & wivrn_vk,
         encoder_settings & settings,
         uint8_t stream_idx,
@@ -109,7 +109,7 @@ std::unique_ptr<VideoEncoder> VideoEncoder::Create(
         float fps)
 {
 	using namespace std::string_literals;
-	std::unique_ptr<VideoEncoder> res;
+	std::unique_ptr<video_encoder> res;
 	settings.range = VK_SAMPLER_YCBCR_RANGE_ITU_FULL;
 	settings.color_model = VK_SAMPLER_YCBCR_MODEL_CONVERSION_YCBCR_709;
 	if (settings.encoder_name == encoder_vulkan)
@@ -118,7 +118,7 @@ std::unique_ptr<VideoEncoder> VideoEncoder::Create(
 		switch (settings.codec)
 		{
 			case video_codec::h264:
-				res = video_encoder_vulkan_h264::create(wivrn_vk, settings, fps);
+				res = video_encoder_vulkan_h264::create(wivrn_vk, settings, fps, stream_idx);
 				break;
 			case video_codec::h265:
 				throw std::runtime_error("h265 not supported for vulkan video encode");
@@ -134,7 +134,7 @@ std::unique_ptr<VideoEncoder> VideoEncoder::Create(
 	if (settings.encoder_name == encoder_x264)
 	{
 #if WIVRN_USE_X264
-		res = std::make_unique<VideoEncoderX264>(wivrn_vk, settings, fps);
+		res = std::make_unique<video_encoder_x264>(wivrn_vk, settings, fps, stream_idx);
 #else
 		throw std::runtime_error("x264 encoder not enabled");
 #endif
@@ -142,7 +142,7 @@ std::unique_ptr<VideoEncoder> VideoEncoder::Create(
 	if (settings.encoder_name == encoder_nvenc)
 	{
 #if WIVRN_USE_NVENC
-		res = std::make_unique<VideoEncoderNvenc>(wivrn_vk, settings, fps);
+		res = std::make_unique<video_encoder_nvenc>(wivrn_vk, settings, fps, stream_idx);
 #else
 		throw std::runtime_error("nvenc support not enabled");
 #endif
@@ -150,14 +150,13 @@ std::unique_ptr<VideoEncoder> VideoEncoder::Create(
 	if (settings.encoder_name == encoder_vaapi)
 	{
 #if WIVRN_USE_VAAPI
-		res = std::make_unique<video_encoder_va>(wivrn_vk, settings, fps);
+		res = std::make_unique<video_encoder_va>(wivrn_vk, settings, fps, stream_idx);
 #else
 		throw std::runtime_error("vaapi support not enabled");
 #endif
 	}
 	if (not res)
 		throw std::runtime_error("Failed to create encoder " + settings.encoder_name);
-	res->stream_idx = stream_idx;
 
 	auto wivrn_dump_video = std::getenv("WIVRN_DUMP_VIDEO");
 	if (wivrn_dump_video)
@@ -182,7 +181,7 @@ std::unique_ptr<VideoEncoder> VideoEncoder::Create(
 }
 
 #if WIVRN_USE_VULKAN_ENCODE
-std::pair<std::vector<vk::VideoProfileInfoKHR>, vk::ImageUsageFlags> VideoEncoder::get_create_image_info(const std::vector<encoder_settings> & settings)
+std::pair<std::vector<vk::VideoProfileInfoKHR>, vk::ImageUsageFlags> video_encoder::get_create_image_info(const std::vector<encoder_settings> & settings)
 {
 	std::pair<std::vector<vk::VideoProfileInfoKHR>, vk::ImageUsageFlags> result;
 	for (const auto & item: settings)
@@ -209,48 +208,50 @@ std::pair<std::vector<vk::VideoProfileInfoKHR>, vk::ImageUsageFlags> VideoEncode
 
 static const uint64_t idr_throttle = 100;
 
-VideoEncoder::VideoEncoder(bool async_send) :
+video_encoder::video_encoder(uint8_t stream_idx, to_headset::video_stream_description::channels_t channels, bool async_send) :
+        stream_idx(stream_idx),
+        channels(channels),
         last_idr_frame(-idr_throttle),
         shared_sender(async_send ? sender::get() : nullptr)
 {}
 
-VideoEncoder::~VideoEncoder()
+video_encoder::~video_encoder()
 {
 	if (shared_sender)
 		shared_sender->wait_idle(this);
 }
 
-void VideoEncoder::on_feedback(const from_headset::feedback & feedback)
+void video_encoder::on_feedback(const from_headset::feedback & feedback)
 {
 	if (not feedback.sent_to_decoder)
 		sync_needed = true;
 }
 
-void VideoEncoder::reset()
+void video_encoder::reset()
 {
 	sync_needed = true;
 }
 
-void VideoEncoder::present_image(vk::Image y_cbcr, vk::raii::CommandBuffer & cmd_buf)
+std::pair<bool, vk::Semaphore> video_encoder::present_image(vk::Image y_cbcr, vk::raii::CommandBuffer & cmd_buf, uint64_t frame_index)
 {
 	// Wait for encoder to be done
-	busy[next_present].wait(true);
-
-	busy[next_present] = true;
-	present_image(y_cbcr, cmd_buf, next_present);
-	next_present = (next_present + 1) % num_slots;
+	present_slot = (present_slot + 1) % num_slots;
+	busy[present_slot].wait(true);
+	busy[present_slot] = true;
+	return present_image(y_cbcr, cmd_buf, present_slot, frame_index);
 }
 
-void VideoEncoder::present_image(vk::Image y_cbcr, vk::raii::CommandBuffer & video_cmd_buf, vk::Fence fence, uint64_t frame_index)
+void video_encoder::post_submit()
 {
-	present_image(y_cbcr, video_cmd_buf, fence, next_present, frame_index);
+	post_submit(present_slot);
 }
 
-void VideoEncoder::Encode(wivrn_session & cnx,
-                          const to_headset::video_stream_data_shard::view_info_t & view_info,
-                          uint64_t frame_index)
+void video_encoder::encode(wivrn_session & cnx,
+                           const to_headset::video_stream_data_shard::view_info_t & view_info,
+                           uint64_t frame_index)
 {
-	assert(busy[next_encode].load());
+	encode_slot = (encode_slot + 1) % num_slots;
+	assert(busy[encode_slot].load());
 	if (shared_sender)
 		shared_sender->wait_idle(this);
 	this->cnx = &cnx;
@@ -259,7 +260,7 @@ void VideoEncoder::Encode(wivrn_session & cnx,
 	// Throttle idr to prevent overloading the decoder
 	if (idr and frame_index < last_idr_frame + idr_throttle)
 	{
-		U_LOG_D("Throttle IDR: stream %d frame %ld", stream_idx, frame_index);
+		U_LOG_D("Throttle IDR: stream %" PRIu8 " frame %" PRIu64, stream_idx, frame_index);
 		sync_needed = true;
 		idr = false;
 	}
@@ -283,7 +284,7 @@ void VideoEncoder::Encode(wivrn_session & cnx,
 	std::exception_ptr ex;
 	try
 	{
-		auto data = encode(idr, target_timestamp, next_encode);
+		auto data = encode(idr, target_timestamp, encode_slot);
 		cnx.dump_time("encode_end", frame_index, os_monotonic_get_ns(), stream_idx, extra);
 		if (data)
 		{
@@ -296,14 +297,13 @@ void VideoEncoder::Encode(wivrn_session & cnx,
 	{
 		ex = std::current_exception();
 	}
-	busy[next_encode] = false;
-	busy[next_encode].notify_all();
-	next_encode = (next_encode + 1) % num_slots;
+	busy[encode_slot] = false;
+	busy[encode_slot].notify_all();
 	if (ex)
 		std::rethrow_exception(ex);
 }
 
-void VideoEncoder::SendData(std::span<uint8_t> data, bool end_of_frame)
+void video_encoder::SendData(std::span<uint8_t> data, bool end_of_frame)
 {
 	std::lock_guard lock(mutex);
 	if (end_of_frame)
@@ -340,7 +340,7 @@ void VideoEncoder::SendData(std::span<uint8_t> data, bool end_of_frame)
 		shard.payload = {begin, next};
 		try
 		{
-			cnx->send_stream(shard);
+			cnx->send_stream(to_headset::video_stream_data_shard{shard});
 		}
 		catch (...)
 		{

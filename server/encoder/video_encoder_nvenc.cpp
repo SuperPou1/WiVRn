@@ -64,19 +64,19 @@
 namespace wivrn
 {
 
-void VideoEncoderNvenc::deleter::operator()(CudaFunctions * fn)
+void video_encoder_nvenc::deleter::operator()(CudaFunctions * fn)
 {
 	cuda_free_functions(&fn);
 }
-void VideoEncoderNvenc::deleter::operator()(NvencFunctions * fn)
+void video_encoder_nvenc::deleter::operator()(NvencFunctions * fn)
 {
 	nvenc_free_functions(&fn);
 }
 
 static auto init()
 {
-	std::unique_ptr<CudaFunctions, VideoEncoderNvenc::deleter> cuda_fn;
-	std::unique_ptr<NvencFunctions, VideoEncoderNvenc::deleter> nvenc_fn;
+	std::unique_ptr<CudaFunctions, video_encoder_nvenc::deleter> cuda_fn;
+	std::unique_ptr<NvencFunctions, video_encoder_nvenc::deleter> nvenc_fn;
 	void * session_handle;
 
 	{
@@ -134,15 +134,19 @@ static auto encode_guid(video_codec codec)
 	throw std::out_of_range("Invalid codec " + std::to_string(codec));
 }
 
-VideoEncoderNvenc::VideoEncoderNvenc(wivrn_vk_bundle & vk, encoder_settings & settings, float fps) :
-        VideoEncoder(true),
+video_encoder_nvenc::video_encoder_nvenc(
+        wivrn_vk_bundle & vk,
+        encoder_settings & settings,
+        float fps,
+        uint8_t stream_idx) :
+        video_encoder(stream_idx, settings.channels, true),
         vk(vk),
         fps(fps),
         bitrate(settings.bitrate)
 {
 	std::tie(cuda_fn, nvenc_fn, fn, cuda, session_handle) = init();
-	settings.video_width += 32 - settings.video_width % 32;
-	settings.video_height += 32 - settings.video_height % 32;
+	assert(settings.width % 32 == 0);
+	assert(settings.height % 32 == 0);
 	rect = vk::Rect2D{
 	        .offset = {
 	                .x = settings.offset_x,
@@ -153,8 +157,6 @@ VideoEncoderNvenc::VideoEncoderNvenc(wivrn_vk_bundle & vk, encoder_settings & se
 	                .height = settings.height,
 	        },
 	};
-	height = settings.video_height;
-	width = settings.video_width;
 
 	uint32_t count;
 	std::vector<GUID> presets;
@@ -247,7 +249,7 @@ VideoEncoderNvenc::VideoEncoderNvenc(wivrn_vk_bundle & vk, encoder_settings & se
 	NVENC_CHECK(fn.nvEncCreateBitstreamBuffer(session_handle, &params3));
 	bitstreamBuffer = params3.bitstreamBuffer;
 
-	vk::DeviceSize buffer_size = width * settings.video_height * 3 / 2;
+	vk::DeviceSize buffer_size = rect.extent.width * settings.video_height * 3 / 2;
 
 	vk::StructureChain buffer_create_info{
 	        vk::BufferCreateInfo{
@@ -309,7 +311,7 @@ VideoEncoderNvenc::VideoEncoderNvenc(wivrn_vk_bundle & vk, encoder_settings & se
 		        .resourceType = NV_ENC_INPUT_RESOURCE_TYPE_CUDADEVICEPTR,
 		        .width = settings.video_width,
 		        .height = settings.video_height,
-		        .pitch = width,
+		        .pitch = rect.extent.width,
 		        .resourceToRegister = (void *)frame,
 		        .bufferFormat = NV_ENC_BUFFER_FORMAT_NV12,
 		        .bufferUsage = NV_ENC_INPUT_IMAGE,
@@ -320,22 +322,23 @@ VideoEncoderNvenc::VideoEncoderNvenc(wivrn_vk_bundle & vk, encoder_settings & se
 	CU_CHECK(cuda_fn->cuCtxPopCurrent(NULL));
 }
 
-VideoEncoderNvenc::~VideoEncoderNvenc()
+video_encoder_nvenc::~video_encoder_nvenc()
 {
 	if (session_handle)
 		fn.nvEncDestroyEncoder(session_handle);
 }
 
-void VideoEncoderNvenc::present_image(vk::Image y_cbcr, vk::raii::CommandBuffer & cmd_buf, uint8_t slot)
+std::pair<bool, vk::Semaphore> video_encoder_nvenc::present_image(vk::Image y_cbcr, vk::raii::CommandBuffer & cmd_buf, uint8_t slot, uint64_t)
 {
 	cmd_buf.copyImageToBuffer(
 	        y_cbcr,
 	        vk::ImageLayout::eTransferSrcOptimal,
 	        *in[slot].yuv,
 	        vk::BufferImageCopy{
-	                .bufferRowLength = width,
+	                .bufferRowLength = rect.extent.width,
 	                .imageSubresource = {
 	                        .aspectMask = vk::ImageAspectFlagBits::ePlane0,
+	                        .baseArrayLayer = uint32_t(channels),
 	                        .layerCount = 1,
 	                },
 	                .imageOffset = {
@@ -352,10 +355,11 @@ void VideoEncoderNvenc::present_image(vk::Image y_cbcr, vk::raii::CommandBuffer 
 	        vk::ImageLayout::eTransferSrcOptimal,
 	        *in[slot].yuv,
 	        vk::BufferImageCopy{
-	                .bufferOffset = width * height,
-	                .bufferRowLength = uint32_t(width / 2),
+	                .bufferOffset = rect.extent.width * rect.extent.height,
+	                .bufferRowLength = uint32_t(rect.extent.width / 2),
 	                .imageSubresource = {
 	                        .aspectMask = vk::ImageAspectFlagBits::ePlane1,
+	                        .baseArrayLayer = uint32_t(channels),
 	                        .layerCount = 1,
 	                },
 	                .imageOffset = {
@@ -367,9 +371,10 @@ void VideoEncoderNvenc::present_image(vk::Image y_cbcr, vk::raii::CommandBuffer 
 	                        .height = rect.extent.height / 2,
 	                        .depth = 1,
 	                }});
+	return {false, nullptr};
 }
 
-std::optional<VideoEncoder::data> VideoEncoderNvenc::encode(bool idr, std::chrono::steady_clock::time_point pts, uint8_t slot)
+std::optional<video_encoder::data> video_encoder_nvenc::encode(bool idr, std::chrono::steady_clock::time_point pts, uint8_t slot)
 {
 	CU_CHECK(cuda_fn->cuCtxPushCurrent(cuda));
 
@@ -382,7 +387,7 @@ std::optional<VideoEncoder::data> VideoEncoderNvenc::encode(bool idr, std::chron
 	        .version = NV_ENC_PIC_PARAMS_VER,
 	        .inputWidth = rect.extent.width,
 	        .inputHeight = rect.extent.height,
-	        .inputPitch = width,
+	        .inputPitch = rect.extent.width,
 	        .encodePicFlags = uint32_t(idr ? NV_ENC_PIC_FLAG_FORCEIDR | NV_ENC_PIC_FLAG_OUTPUT_SPSPPS : 0),
 	        .frameIdx = 0,
 	        .inputTimeStamp = 0,
@@ -412,7 +417,7 @@ std::optional<VideoEncoder::data> VideoEncoderNvenc::encode(bool idr, std::chron
 	};
 }
 
-std::array<int, 2> VideoEncoderNvenc::get_max_size(video_codec codec)
+std::array<int, 2> video_encoder_nvenc::get_max_size(video_codec codec)
 {
 	auto [cuda_fn, nvenc_fn, fn, cuda, session_handle] = init();
 	std::array<int, 2> result;

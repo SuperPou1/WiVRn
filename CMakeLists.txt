@@ -6,7 +6,7 @@ set(CMAKE_POLICY_DEFAULT_CMP0069 NEW)
 set(CMAKE_POLICY_DEFAULT_CMP0077 NEW)
 
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
-set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_MODULE_PATH ${CMAKE_CURRENT_SOURCE_DIR}/cmake)
 
 # Default to PIC code
@@ -27,6 +27,7 @@ option(WIVRN_USE_ANDROID_VALIDATION_LAYER "Download the android version of the V
 option(WIVRN_BUILD_CLIENT "Build WiVRn client" OFF)
 option(WIVRN_BUILD_SERVER "Build WiVRn server" ON)
 option(WIVRN_BUILD_DASHBOARD "Build WiVRn dashboard" OFF)
+option(WIVRN_BUILD_WIVRNCTL "Build wivrnctl" ON)
 option(WIVRN_BUILD_DISSECTOR "Build Wireshark dissector" OFF)
 option(WIVRN_WERROR "Treat warnings as errors" OFF)
 
@@ -38,14 +39,24 @@ auto_option(WIVRN_USE_X264 "Enable x264 software encoder" AUTO)
 auto_option(WIVRN_USE_PIPEWIRE "Enable pipewire backend" AUTO)
 auto_option(WIVRN_USE_PULSEAUDIO "Enable pulseaudio backend" AUTO)
 
+set(OPENCOMPOSITE_SEARCH_PATH "/usr/local/lib/OpenComposite:/usr/lib/OpenComposite:/opt/OpenComposite"
+    CACHE STRING "List of places to search for OpenComposite, separated by :")
+
 option(WIVRN_FEATURE_RENDERDOC "Support renderdoc" OFF)
 option(WIVRN_FEATURE_SOLARXR "Enable SolarXR driver" OFF)
 option(WIVRN_FEATURE_STEAMVR_LIGHTHOUSE "Enable SteamVR Lighthouse driver" OFF)
-option(WIVRN_FEATURE_Kinect "Enable Kinect driver" ON)
 
 option(WIVRN_CHECK_CAPSYSNICE "Check if CAP_SYS_NICE is available at startup" ON)
+set(WIVRN_CSS "${CMAKE_SOURCE_DIR}/images/wivrn-local.css" CACHE STRING "Stylesheet to use to render SVGs" )
 
-option(WIVRN_OPENXR_INSTALL_ABSOLUTE_RUNTIME_PATH OFF)
+option(WIVRN_SHOW_IMGUI_DEMO_WINDOW "Show the Dear ImGui demo window in the client" OFF)
+option(WIVRN_CLIENT_DEBUG_MENU "Enable the debug menu in the client" OFF)
+
+set(WIVRN_OPENXR_MANIFEST_TYPE_VALUES relative absolute filename)
+set(WIVRN_OPENXR_MANIFEST_TYPE "relative" CACHE STRING "How to reference libraries in OpenXR manifest: ${WIVRN_OPENXR_MANIFEST_TYPE_VALUES}")
+if (NOT WIVRN_OPENXR_MANIFEST_TYPE IN_LIST WIVRN_OPENXR_MANIFEST_TYPE_VALUES)
+    message(FATAL_ERROR "WIVRN_OPENXR_MANIFEST_TYPE must be one of ${WIVRN_OPENXR_MANIFEST_TYPE_VALUES}")
+endif()
 
 option(ENABLE_COLOURED_OUTPUT "Always produce ANSI-coloured output (GNU/Clang only)." ON)
 
@@ -60,6 +71,9 @@ endif()
 find_package(PkgConfig REQUIRED)
 find_package(Vulkan REQUIRED)
 find_package(Git)
+if (NOT ANDROID)
+    find_package(OpenSSL REQUIRED)
+endif()
 include(VulkanVersion)
 
 if (WIVRN_USE_SYSTEM_BOOST STREQUAL "AUTO")
@@ -77,12 +91,13 @@ elseif(WIVRN_USE_SYSTEM_BOOST STREQUAL "ON")
 endif()
 
 if (WIVRN_BUILD_SERVER)
+    find_program(GDBUS_CODEGEN gdbus-codegen REQUIRED)
     if (Vulkan_VERSION  VERSION_LESS "1.3.261")
         message(FATAL_ERROR "Vulkan version must be at least 1.3.261, found ${Vulkan_VERSION}")
     endif()
 
-    if (NOT WIVRN_USE_NVENC AND NOT WIVRN_USE_VAAPI AND NOT WIVRN_USE_X264)
-        message(FATAL_ERROR "No encoder selected, use at least one of WIVRN_USE_NVENC, WIVRN_USE_VAAPI or WIVRN_USE_X264")
+    if (NOT WIVRN_USE_NVENC AND NOT WIVRN_USE_VAAPI AND NOT WIVRN_USE_X264 AND NOT WIVRN_USE_VULKAN_ENCODE)
+        message(FATAL_ERROR "No encoder selected, use at least one of WIVRN_USE_NVENC, WIVRN_USE_VAAPI, WIVRN_USE_VULKAN_ENCODE or WIVRN_USE_X264")
     endif()
 
     if (WIVRN_USE_VAAPI STREQUAL "AUTO")
@@ -160,6 +175,8 @@ if (WIVRN_BUILD_SERVER)
     find_package(CLI11 REQUIRED)
 
     pkg_check_modules(glib2 REQUIRED IMPORTED_TARGET glib-2.0 gio-2.0 gio-unix-2.0)
+
+    pkg_check_modules(libnotify REQUIRED IMPORTED_TARGET libnotify)
 endif()
 
 if (WIVRN_BUILD_DASHBOARD)
@@ -172,6 +189,10 @@ if (WIVRN_BUILD_DASHBOARD)
     set(CMAKE_AUTOMOC ON)
     set(CMAKE_AUTORCC ON)
     set(CMAKE_AUTOUIC ON)
+endif()
+
+if (WIVRN_BUILD_CLIENT OR WIVRN_BUILD_DASHBOARD)
+    find_program(RSVG_CONVERT rsvg-convert REQUIRED)
 endif()
 
 if (WIVRN_BUILD_CLIENT AND NOT ANDROID)
@@ -201,9 +222,15 @@ if (WIVRN_BUILD_DISSECTOR)
     find_package(Wireshark REQUIRED)
 endif()
 
+if (WIVRN_BUILD_WIVRNCTL)
+    find_package(CLI11 REQUIRED)
+    pkg_search_module(SYSTEMD REQUIRED IMPORTED_TARGET libsystemd libelogind)
+endif()
+
 # Common dependencies
 FetchContent_Declare(boostpfr      EXCLUDE_FROM_ALL SYSTEM URL https://github.com/boostorg/pfr/archive/refs/tags/2.2.0.tar.gz)
 FetchContent_Declare(boost         EXCLUDE_FROM_ALL SYSTEM URL https://github.com/boostorg/boost/releases/download/boost-1.84.0/boost-1.84.0.tar.xz)
+
 # Client dependencies
 FetchContent_Declare(simdjson      EXCLUDE_FROM_ALL SYSTEM URL https://github.com/simdjson/simdjson/archive/refs/tags/v3.10.1.tar.gz)
 FetchContent_Declare(fastgltf      EXCLUDE_FROM_ALL SYSTEM URL https://github.com/spnda/fastgltf/archive/refs/tags/v0.7.1.tar.gz)
@@ -213,18 +240,23 @@ FetchContent_Declare(spdlog        EXCLUDE_FROM_ALL SYSTEM URL https://github.co
 FetchContent_Declare(stb           EXCLUDE_FROM_ALL SYSTEM URL https://github.com/nothings/stb/archive/013ac3beddff3dbffafd5177e7972067cd2b5083.zip)
 FetchContent_Declare(libktx        EXCLUDE_FROM_ALL SYSTEM URL https://github.com/KhronosGroup/KTX-Software/archive/refs/tags/v4.3.0.tar.gz)
 FetchContent_Declare(implot        EXCLUDE_FROM_ALL SYSTEM URL https://github.com/epezent/implot/archive/refs/tags/v0.16.tar.gz)
-FetchContent_Declare(imgui         EXCLUDE_FROM_ALL SYSTEM URL https://github.com/ocornut/imgui/archive/refs/tags/v1.90.1.tar.gz)
+file(GLOB IMGUI_PATCHES CONFIGURE_DEPENDS patches/imgui/*)
+FetchContent_Declare(imgui         EXCLUDE_FROM_ALL SYSTEM URL https://github.com/ocornut/imgui/archive/refs/tags/v1.91.3.tar.gz
+                                   PATCH_COMMAND    ${CMAKE_CURRENT_LIST_DIR}/patches/apply.sh ${IMGUI_PATCHES}
+)
 # Use the docking branch of imgui to use multi-viewport
 # FetchContent_Declare(imgui         EXCLUDE_FROM_ALL URL https://github.com/ocornut/imgui/archive/ce0d0ac8298ce164b5d862577e8b087d92f6e90e.zip)
+FetchContent_Declare(uni-algo      EXCLUDE_FROM_ALL SYSTEM URL https://github.com/uni-algo/uni-algo/archive/v1.2.0.tar.gz)
 
+file(GLOB MONADO_PATCHES CONFIGURE_DEPENDS patches/monado/*)
 # Server dependencies
 FetchContent_Declare(monado
     GIT_REPOSITORY   https://gitlab.freedesktop.org/monado/monado
     # The flatpak manifest is updated automatically
-    GIT_TAG          d7089f182b0514e13554e99512d63e69c30523c5
-    PATCH_COMMAND    ${CMAKE_CURRENT_LIST_DIR}/patches/apply.sh ${CMAKE_CURRENT_LIST_DIR}/patches/monado/
+    GIT_TAG aa2b0f9f1d638becd6bb9ca3c357ac2561a36b07
+    PATCH_COMMAND    ${CMAKE_CURRENT_LIST_DIR}/patches/apply.sh ${MONADO_PATCHES}
     EXCLUDE_FROM_ALL
-    )
+)
 
 add_subdirectory(external)
 add_subdirectory(common)
@@ -267,7 +299,7 @@ foreach(TARGET_NAME wivrn wivrn-server wivrn-dashboard wivrn-common wivrn-dissec
             -Wno-comment
             -Wno-unused-variable
             -Wno-sign-compare
-            $<$<COMPILE_LANG_AND_ID:CXX,GNU>:-Wno-volatile>
+            $<$<COMPILE_LANG_AND_ID:CXX,GNU>:-Wno-volatile -Wno-array-bounds>
             $<$<COMPILE_LANG_AND_ID:CXX,Clang>:-Wno-deprecated-volatile -Wno-unneeded-internal-declaration -Wno-c99-extensions -Wno-unused-private-field>
         )
 

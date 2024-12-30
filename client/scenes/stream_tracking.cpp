@@ -19,15 +19,19 @@
 
 #include "application.h"
 #include "stream.h"
-#include "utils/ranges.h"
+#include <ranges>
 #include <spdlog/spdlog.h>
 #include <thread>
 
 #ifdef __ANDROID__
+#include "android/battery.h"
 #include "android/jnipp.h"
 #endif
 
 using tid = to_headset::tracking_control::id;
+
+static const XrDuration min_tracking_period = 2'000'000;
+static const XrDuration max_tracking_period = 5'000'000;
 
 static from_headset::tracking::pose locate_space(device_id device, XrSpace space, XrSpace reference, XrTime time)
 {
@@ -159,22 +163,6 @@ void scenes::stream::tracking()
 #ifdef __ANDROID__
 	// Runtime may use JNI and needs the thread to be attached
 	application::instance().setup_jni();
-	jni::object<""> act(application::native_app()->activity->clazz);
-	auto app = act.call<jni::object<"android/app/Application">>("getApplication");
-	auto ctx = app.call<jni::object<"android/content/Context">>("getApplicationContext");
-
-	jni::string filter_jstr("android.intent.action.BATTERY_CHANGED");
-	jni::string level_jstr("level");
-	jni::string scale_jstr("scale");
-	jni::string plugged_jstr("plugged");
-	jni::Int default_jint(-1);
-
-	auto receiver_jobj = jni::object<"android/content/BroadcastReceiver">(NULL);
-	auto filter_jobj = jni::new_object<"android/content/IntentFilter">(filter_jstr);
-
-	auto register_receiver = jni::klass("android/content/Context")
-	                                 .method<jni::object<"android/content/Intent">>("registerReceiver", receiver_jobj, filter_jobj);
-	auto get_int_extra = jni::klass("android/content/Intent").method<jni::Int>("getIntExtra", level_jstr, default_jint);
 
 	XrTime next_battery_check = 0;
 	const XrDuration battery_check_interval = 30'000'000'000; // 30s
@@ -198,10 +186,10 @@ void scenes::stream::tracking()
 
 	XrSpace view_space = application::space(xr::spaces::view);
 	XrSpace world_space = application::space(xr::spaces::world);
-	XrDuration tracking_period = 1'000'000; // Send tracking data every 1ms
-	const XrDuration dt = 100'000;          // Wake up 0.1ms before measuring the position
+	XrDuration tracking_period = min_tracking_period;
 
 	XrTime t0 = instance.now();
+	XrTime last_hand_sample = t0;
 	std::vector<from_headset::tracking> tracking;
 	std::vector<from_headset::hand_tracking> hands;
 	int skip_samples = 0;
@@ -218,7 +206,7 @@ void scenes::stream::tracking()
 
 			XrTime now = instance.now();
 			if (now < t0)
-				std::this_thread::sleep_for(std::chrono::nanoseconds(t0 - now - dt));
+				std::this_thread::sleep_for(std::chrono::nanoseconds(t0 - now));
 
 			// If thread can't keep up, skip timestamps
 			t0 = std::max(t0, now);
@@ -245,7 +233,7 @@ void scenes::stream::tracking()
 					auto [flags, views] = session.locate_views(XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO, t0 + Δt, view_space);
 					assert(views.size() == packet.views.size());
 
-					for (auto [i, j]: utils::zip(views, packet.views))
+					for (auto [i, j]: std::views::zip(views, packet.views))
 					{
 						j.pose = i.pose;
 						j.fov = i.fov;
@@ -264,8 +252,11 @@ void scenes::stream::tracking()
 							packet.device_poses.push_back(locate_space(device, space, world_space, t0 + Δt));
 					}
 
-					if (hand_tracking)
+					// Hand tracking data are very large, send fewer samples than other items
+					if (hand_tracking and t0 >= last_hand_sample + period and
+					    (Δt == 0 or Δt >= prediction - 2 * period))
 					{
+						last_hand_sample = t0;
 						if (control.enabled[size_t(tid::left_hand)])
 							hands.emplace_back(
 							        t0,
@@ -302,7 +293,7 @@ void scenes::stream::tracking()
 
 			XrDuration busy_time = t.count();
 			// Target: polling between 1 and 5ms, with 20% busy time
-			tracking_period = std::clamp<XrDuration>(std::lerp(tracking_period, busy_time * 5, 0.2), 1'000'000, 5'000'000);
+			tracking_period = std::clamp<XrDuration>(std::lerp(tracking_period, busy_time * 5, 0.2), min_tracking_period, max_tracking_period);
 
 			if (samples and busy_time / samples > 2'000'000)
 			{
@@ -313,24 +304,13 @@ void scenes::stream::tracking()
 			if (next_battery_check < now and control.enabled[size_t(tid::battery)])
 			{
 				timer t2(instance);
-				from_headset::battery battery{};
-				auto intent = ctx.call<jni::object<"android/content/Intent">>(register_receiver, receiver_jobj, filter_jobj);
-				if (intent)
-				{
-					auto level_jint = intent.call<jni::Int>(get_int_extra, level_jstr, default_jint);
-					auto scale_jint = intent.call<jni::Int>(get_int_extra, scale_jstr, default_jint);
 
-					if (level_jint && level_jint.value >= 0 && scale_jint && scale_jint.value >= 0)
-					{
-						battery.present = true;
-						battery.charge = (float)(level_jint.value) / (float)(scale_jint.value);
-					}
-
-					auto plugged_jint = intent.call<jni::Int>(get_int_extra, plugged_jstr, default_jint);
-					battery.charging = plugged_jint && plugged_jint.value > 0;
-				}
-
-				network_session->send_stream(battery);
+				auto status = get_battery_status();
+				network_session->send_stream(from_headset::battery{
+				        .charge = status.charge.value_or(-1),
+				        .present = status.charge.has_value(),
+				        .charging = status.charging,
+				});
 
 				next_battery_check = now + battery_check_interval;
 				XrDuration battery_dur = t2.count();
@@ -363,7 +343,7 @@ void scenes::stream::tracking()
 					wivrn_session::stream_socket_t::serialize(packets.emplace_back(), i);
 			}
 
-			network_session->send_stream(std::span(packets));
+			network_session->send_stream(std::move(packets));
 
 			t0 += tracking_period;
 		}
@@ -378,5 +358,9 @@ void scenes::stream::tracking()
 void scenes::stream::operator()(to_headset::tracking_control && packet)
 {
 	std::lock_guard lock(tracking_control_mutex);
+	auto m = size_t(to_headset::tracking_control::id::microphone);
+	if (audio_handle)
+		audio_handle->set_mic_sate(packet.enabled[m]);
+
 	tracking_control = packet;
 }

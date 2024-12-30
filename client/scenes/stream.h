@@ -27,6 +27,7 @@
 #include "wifi_lock.h"
 #include "wivrn_client.h"
 #include "wivrn_packets.h"
+#include "xr/passthrough.h"
 #include <mutex>
 #include <shared_mutex>
 #include <thread>
@@ -60,7 +61,8 @@ private:
 		// latest frames from oldest to most recent
 		std::array<std::shared_ptr<wivrn::shard_accumulator::blit_handle>, image_buffer_size> latest_frames;
 
-		std::shared_ptr<wivrn::shard_accumulator::blit_handle> frame(std::optional<uint64_t> id) const;
+		std::shared_ptr<wivrn::shard_accumulator::blit_handle> frame(uint64_t id) const;
+		bool alpha() const;
 		std::vector<uint64_t> frames() const;
 	};
 
@@ -83,7 +85,7 @@ private:
 	std::atomic<bool> exiting = false;
 	std::thread network_thread;
 	std::mutex tracking_control_mutex;
-	to_headset::tracking_control tracking_control;
+	to_headset::tracking_control tracking_control{};
 	std::atomic<bool> recenter_requested = false;
 	std::atomic<XrDuration> display_time_phase = 0;
 	std::atomic<XrDuration> display_time_period = 0;
@@ -98,6 +100,8 @@ private:
 	std::array<renderpass_output, view_count> decoder_output{};
 
 	std::optional<stream_reprojection> reprojector;
+
+	std::optional<xr::passthrough> passthrough;
 
 	vk::raii::Fence fence = nullptr;
 	vk::raii::CommandBuffer command_buffer = nullptr;
@@ -138,6 +142,9 @@ public:
 	void on_focused() override;
 	void on_unfocused() override;
 
+	void operator()(to_headset::crypto_handshake &&) {};
+	void operator()(to_headset::pin_check_2 &&) {};
+	void operator()(to_headset::pin_check_4 &&) {};
 	void operator()(to_headset::handshake &&) {};
 	void operator()(to_headset::video_stream_data_shard &&);
 	void operator()(to_headset::haptics &&);
@@ -232,7 +239,7 @@ private:
 	int metrics_offset = 0;
 
 	void accumulate_metrics(XrTime predicted_display_time, const std::vector<std::shared_ptr<wivrn::shard_accumulator::blit_handle>> & blit_handles, const gpu_timestamps & timestamps);
-	XrCompositionLayerQuad plot_performance_metrics(XrTime predicted_display_time);
+	std::vector<XrCompositionLayerQuad> plot_performance_metrics(XrTime predicted_display_time);
 	void on_reference_space_changed(XrReferenceSpaceType space, XrTime) override;
 };
 } // namespace scenes

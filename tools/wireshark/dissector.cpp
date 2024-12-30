@@ -22,15 +22,16 @@
 #include <cmath>
 #include <epan/ftypes/ftypes.h>
 #include <epan/packet.h>
-
-#include <boost/pfr.hpp>
-#include <epan/tvbuff.h>
-#include <magic_enum.hpp>
-
-#include "wivrn_packets.h"
 #include <epan/proto.h>
+#include <epan/tvbuff.h>
 #include <epan/unit_strings.h>
 #include <ws_version.h>
+
+#include <boost/pfr.hpp>
+#include <magic_enum.hpp>
+
+#include "smp.h"
+#include "wivrn_packets.h"
 
 #if WIRESHARK_VERSION_MAJOR > 4 || (WIRESHARK_VERSION_MAJOR == 4 && WIRESHARK_VERSION_MINOR >= 4)
 static inline uint16_t get_uint16(tvbuff_t * tvb, const int offset, const unsigned encoding)
@@ -644,6 +645,43 @@ struct tree_traits<abbrev, std::chrono::nanoseconds>
 };
 
 template <details::fixed_string abbrev>
+struct tree_traits<abbrev, std::chrono::seconds>
+{
+	static inline int field_handle = -1;
+	using T = std::chrono::seconds::rep;
+
+	static void info()
+	{
+		hf_register_info hf = {
+		        .p_id = &field_handle,
+		        .hfinfo = {
+		                .name = strdup(details::name_from_abbrev(abbrev.value).c_str()),
+		                .abbrev = abbrev.value,
+		                .type = details::field_type<T>,
+		                .display = BASE_DEC | BASE_UNIT_STRING,
+		                .strings = &units_seconds,
+		                .bitmask = 0,
+		                .blurb = "",
+		        }};
+		HFILL_INIT(hf);
+
+		fields.push_back(hf);
+	}
+
+	static void dissect(proto_tree * tree, tvbuff_t * tvb, int & start)
+	{
+		proto_tree_add_item(tree, field_handle, tvb, start, sizeof(T), ENC_LITTLE_ENDIAN);
+		start += sizeof(T);
+	}
+
+	static size_t size(tvbuff_t * tvb, int & start)
+	{
+		start += sizeof(T);
+		return sizeof(T);
+	}
+};
+
+template <details::fixed_string abbrev>
 struct tree_traits<abbrev, std::span<uint8_t>>
 {
 	static inline int field_handle = -1;
@@ -700,6 +738,49 @@ struct tree_traits<abbrev, data_holder>
 	static size_t size(tvbuff_t * tvb, int & start)
 	{
 		return 0;
+	}
+};
+
+template <details::fixed_string abbrev>
+struct tree_traits<abbrev, crypto::bignum>
+{
+	static inline int field_handle = -1;
+
+	static void info()
+	{
+		hf_register_info hf = {
+		        .p_id = &field_handle,
+		        .hfinfo = {
+		                .name = strdup(details::name_from_abbrev(abbrev.value).c_str()),
+		                .abbrev = abbrev.value,
+		                .type = FT_BYTES,
+		                .display = BASE_NONE,
+		                .strings = nullptr,
+		                .bitmask = 0,
+		                .blurb = "",
+		        }};
+		HFILL_INIT(hf);
+
+		fields.push_back(hf);
+	}
+
+	static void dissect(proto_tree * tree, tvbuff_t * tvb, int & start)
+	{
+		size_t string_size = get_uint16(tvb, start, ENC_LITTLE_ENDIAN);
+		start += sizeof(uint16_t);
+
+		proto_tree_add_item(tree, field_handle, tvb, start, string_size, ENC_STRING);
+
+		start += string_size;
+	}
+
+	static size_t size(tvbuff_t * tvb, int & start)
+	{
+		size_t string_size = get_uint16(tvb, start, ENC_LITTLE_ENDIAN);
+		start += sizeof(uint16_t);
+		start += string_size;
+
+		return sizeof(uint16_t) + string_size;
 	}
 };
 

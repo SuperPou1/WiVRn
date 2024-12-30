@@ -68,16 +68,16 @@ public:
 		{
 		}
 	}
-	void send(wivrn_connection & connection);
+	void send(wivrn_connection & connection, bool now = false);
 
-	void set_enabled(to_headset::tracking_control::id id, bool enabled);
+	// Return true if value changed
+	bool set_enabled(to_headset::tracking_control::id id, bool enabled);
 };
 
 class wivrn_session : public xrt_system_devices
 {
 	friend wivrn_comp_target_factory;
-	wivrn_connection connection;
-	from_headset::headset_info_packet info{};
+	std::unique_ptr<wivrn_connection> connection;
 
 	u_system & xrt_system;
 	xrt_space_overseer * space_overseer;
@@ -89,7 +89,6 @@ class wivrn_session : public xrt_system_devices
 	        .right = -1,
 	        .gamepad = -1,
 	};
-	std::array<xrt_reference, XRT_DEVICE_FEATURE_MAX_ENUM> feature_use{};
 
 	wivrn_hmd hmd;
 	wivrn_controller left_hand;
@@ -112,10 +111,12 @@ class wivrn_session : public xrt_system_devices
 
 	std::jthread thread;
 
-	wivrn_session(TCP && tcp, u_system &);
+	wivrn_session(std::unique_ptr<wivrn_connection> connection, u_system &);
 
 public:
-	static xrt_result_t create_session(TCP && tcp,
+	~wivrn_session();
+
+	static xrt_result_t create_session(std::unique_ptr<wivrn_connection> connection,
 	                                   u_system & system,
 	                                   xrt_system_devices ** out_xsysd,
 	                                   xrt_space_overseer ** out_xspovrs,
@@ -125,7 +126,7 @@ public:
 	bool connected();
 	const from_headset::headset_info_packet & get_info()
 	{
-		return info;
+		return connection->info();
 	};
 
 	void add_predict_offset(std::chrono::nanoseconds off)
@@ -133,15 +134,14 @@ public:
 		tracking_control.add(off);
 	}
 
-	void set_enabled(to_headset::tracking_control::id id, bool enabled)
-	{
-		tracking_control.set_enabled(id, enabled);
-	}
-
+	void set_enabled(to_headset::tracking_control::id id, bool enabled);
 	void set_enabled(device_id id, bool enabled);
 
-	void operator()(from_headset::handshake &&) {}
+	void operator()(from_headset::crypto_handshake &&) {}
+	void operator()(from_headset::pin_check_1 &&) {}
+	void operator()(from_headset::pin_check_3 &&) {}
 	void operator()(from_headset::headset_info_packet &&);
+	void operator()(from_headset::handshake &&) {}
 	void operator()(from_headset::trackings &&);
 	void operator()(const from_headset::tracking &);
 	void operator()(from_headset::hand_tracking &&);
@@ -156,13 +156,13 @@ public:
 	template <typename T>
 	void send_stream(T && packet)
 	{
-		connection.send_stream(std::forward<T>(packet));
+		connection->send_stream(std::forward<T>(packet));
 	}
 
 	template <typename T>
 	void send_control(T && packet)
 	{
-		connection.send_control(std::forward<T>(packet));
+		connection->send_control(std::forward<T>(packet));
 	}
 
 	std::array<to_headset::foveation_parameter, 2> set_foveated_size(uint32_t width, uint32_t height);

@@ -102,6 +102,43 @@ void wivrn_server::on_server_properties_changed(const QString & interface_name, 
 		m_jsonConfiguration = changed_properties["JsonConfiguration"].toString();
 	}
 
+	if (changed_properties.contains("Pin"))
+	{
+		pinChanged(m_pin = changed_properties["Pin"].toString());
+	}
+
+	if (changed_properties.contains("KnownKeys"))
+	{
+		m_knownKeys.clear();
+
+		const auto keys = qvariant_cast<QDBusArgument>(changed_properties["KnownKeys"]);
+		keys.beginArray();
+
+		while (not keys.atEnd())
+		{
+			keys.beginStructure();
+			QString public_key;
+			QString name;
+			keys >> name >> public_key;
+			keys.endStructure();
+
+			m_knownKeys.push_back(HeadsetKey{public_key, name});
+		}
+		keys.endArray();
+
+		knownKeysChanged(m_knownKeys);
+	}
+
+	if (changed_properties.contains("PairingEnabled"))
+	{
+		pairingEnabledChanged(m_isPairingEnabled = changed_properties["PairingEnabled"].toBool());
+	}
+
+	if (changed_properties.contains("EncryptionEnabled"))
+	{
+		encryptionEnabledChanged(m_isEncryptionEnabled = changed_properties["EncryptionEnabled"].toBool());
+	}
+
 	if (changed_properties.contains("RecommendedEyeSize"))
 	{
 		const auto arg = qvariant_cast<QDBusArgument>(changed_properties["RecommendedEyeSize"]);
@@ -203,6 +240,26 @@ void wivrn_server::on_server_properties_changed(const QString & interface_name, 
 void wivrn_server::setJsonConfiguration(QString new_configuration)
 {
 	server_interface->setJsonConfiguration(m_jsonConfiguration = new_configuration);
+}
+
+void wivrn_server::revoke_key(QString public_key)
+{
+	server_interface->RevokeKey(public_key);
+}
+
+void wivrn_server::rename_key(QString public_key, QString name)
+{
+	server_interface->RenameKey(public_key, name);
+}
+
+QString wivrn_server::enable_pairing(int timeout_secs)
+{
+	return server_interface->EnablePairing(timeout_secs).value();
+}
+
+void wivrn_server::disable_pairing()
+{
+	server_interface->DisablePairing();
 }
 
 QString wivrn_server::hostname()

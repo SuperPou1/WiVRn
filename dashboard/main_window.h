@@ -49,9 +49,6 @@ class main_window : public QMainWindow
 	Ui::MainWindow * ui = nullptr;
 	wivrn_server * server_interface = nullptr;
 
-	settings * settings_window = nullptr;
-	wizard * wizard_window = nullptr;
-
 	QIcon icon{":/images/wivrn.png"};
 	QSystemTrayIcon systray{icon};
 
@@ -100,11 +97,13 @@ private:
 	void on_speaker_changed();
 	void on_supported_codecs_changed(QStringList value);
 	void on_steam_command_changed(QString value);
+	void on_pin_changed(QString value);
 
 	void on_android_device_list_changed(const std::vector<adb::device> &);
 
 	void on_action_settings();
 	void on_action_wizard();
+	void on_action_manage_headsets();
 	void on_action_usb(const std::string & serial);
 	void start_server();
 	void stop_server();

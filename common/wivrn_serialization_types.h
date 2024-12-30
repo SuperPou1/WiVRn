@@ -28,12 +28,6 @@ namespace wivrn
 // contains the data referenced by spans
 struct data_holder
 {
-	data_holder() = default;
-	data_holder(const data_holder &) = delete;
-	data_holder(data_holder &&) = default;
-	data_holder & operator=(const data_holder &) = delete;
-	data_holder & operator=(data_holder &&) = default;
-
 	std::shared_ptr<uint8_t[]> c;
 };
 

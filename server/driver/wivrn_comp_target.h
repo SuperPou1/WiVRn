@@ -24,6 +24,7 @@
 #include "encoder/encoder_settings.h"
 #include "utils/wivrn_vk_bundle.h"
 #include "vk/allocation.h"
+#include "wivrn_foveation.h"
 #include "wivrn_pacer.h"
 #include "wivrn_packets.h"
 
@@ -37,9 +38,8 @@
 namespace wivrn
 {
 
-class wivrn_foveation_renderer;
 class wivrn_session;
-class VideoEncoder;
+class video_encoder;
 
 struct pseudo_swapchain
 {
@@ -60,11 +60,7 @@ struct pseudo_swapchain
 		vk::raii::ImageView image_view_y = nullptr;
 		vk::raii::ImageView image_view_cbcr = nullptr;
 		status_t status;
-		vk::raii::CommandBuffer video_command_buffer = nullptr;
-		vk::raii::Fence video_fence = nullptr;
 	};
-	vk::raii::Semaphore video_sem = nullptr;
-	vk::raii::CommandPool video_command_pool = nullptr;
 	std::vector<item> images;
 
 	// bitmask of encoder status, first bit to request exit, then one bit per thread:
@@ -101,7 +97,7 @@ struct wivrn_comp_target : public comp_target
 	std::vector<encoder_settings> settings;
 	to_headset::video_stream_description desc{};
 	std::list<std::jthread> encoder_threads;
-	std::vector<std::shared_ptr<VideoEncoder>> encoders;
+	std::vector<std::shared_ptr<video_encoder>> encoders;
 
 	wivrn::wivrn_session & cnx;
 	std::unique_ptr<wivrn_foveation_renderer> foveation_renderer = nullptr;

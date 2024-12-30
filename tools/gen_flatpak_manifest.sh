@@ -9,6 +9,8 @@ do
     case "$1" in
         "--git")
         WIVRN_SRC_TYPE=git
+        shift
+        WIVRN_SRC2="url: $1"
         ;;
         "--gitlocal")
         WIVRN_SRC_TYPE=gitlocal
@@ -26,7 +28,7 @@ cd $(dirname $0)
 GIT_TAG=$(git describe --exact-match --tags 2>/dev/null || true)
 GIT_SHA=$(git rev-parse HEAD)
 GIT_COMMIT=$(git describe --exact-match --tags 2>/dev/null || git rev-parse HEAD)
-GIT_DESC=$(git describe --tags)
+GIT_DESC=$(git describe --tags --always)
 
 MONADO_COMMIT=$(grep -zo "FetchContent_Declare(monado[^)]*)" ../CMakeLists.txt | sed -ze "s/^.*GIT_TAG *\([^ )]*\).*$/\1/" | tr -d '\0')
 BOOSTPFR_URL=$(grep -zo "FetchContent_Declare(boostpfr[^)]*)" ../CMakeLists.txt | sed -ze "s/^.*URL *\([^ )]*\).*$/\1/" | tr -d '\0')
@@ -35,7 +37,6 @@ BOOSTPFR_SHA256=$(curl --silent --location $BOOSTPFR_URL | sha256sum | cut -f1 -
 if [ $WIVRN_SRC_TYPE = git ]
 then
     WIVRN_SRC1="type: git"
-    WIVRN_SRC2="url: https://github.com/WiVRn/WiVRn.git"
     WIVRN_SRC3="tag: ${GIT_COMMIT}"
 elif [ $WIVRN_SRC_TYPE = gitlocal ]
 then

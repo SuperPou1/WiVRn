@@ -15,6 +15,7 @@
 			<li>Meta Quest 1</li>
 			<li>Meta Quest 2</li>
 			<li>Meta Quest 3</li>
+			<li>Meta Quest 3S</li>
 			<li>Meta Quest Pro</li>
 			<li>Pico Neo 4</li>
 			<li>HTC Vive Focus 3</li>
@@ -63,12 +64,39 @@
 	<url type="homepage">https://wivrn.github.io</url>
 	<url type="vcs-browser">https://www.github.com/WiVRn/WiVRn</url>
 	<url type="bugtracker">https://github.com/WiVRn/WiVRn/issues</url>
-
-	<icon type="stock">io.github.wivrn.wivrn</icon>
+	<url type="donation">https://opencollective.com/wivrn</url>
 
 	<content_rating type="oars-1.1" />
 
 	<releases>
+		<release version="0.22" date="2024-12-05">
+			<url type="details">https://github.com/WiVRn/WiVRn/releases/tag/v0.22</url>
+			<description>
+				<ul>
+					<li>Passthrough streaming support</li>
+					<li>Fully encrypted connection</li>
+					<li>Improved compositor pacing</li>
+					<li>Add support for Quest 3S</li>
+					<li>Add wivrnctl utility to control server</li>
+					<li>Add Spanish translation for headset app</li>
+				</ul>
+			</description>
+		</release>
+
+		<release version="0.21" date="2024-11-03">
+			<url type="details">https://github.com/WiVRn/WiVRn/releases/tag/v0.21</url>
+			<description>
+				<ul>
+					<li>Fixed multiple dashboard issues</li>
+					<li>Improved compositor pacing</li>
+					<li>Changed default encoder configuration</li>
+					<li>Inhibit sleeping while a session is active</li>
+					<li>Avahi publication is now optional</li>
+					<li>Always set the active runtime even if there was already one</li>
+				</ul>
+			</description>
+		</release>
+
 		<release version="0.20" date="2024-10-14">
 			<url type="details">https://github.com/WiVRn/WiVRn/releases/tag/v0.20</url>
 			<description>

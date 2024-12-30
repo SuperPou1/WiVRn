@@ -3,13 +3,13 @@ on: [push, pull_request]
 jobs:
   locale-check:
     name: Locale check
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     if: ${{ vars.APK_ONLY == '' }}
     steps:
     - uses: actions/checkout@v4
 
     - name: Install dependencies
-      run: sudo apt-get update && sudo apt-get install gettext qt6-base-dev qt6-tools-dev qt6-l10n-tools qtchooser
+      run: sudo apt-get update && sudo apt-get install gettext qt6-base-dev qt6-tools-dev qt6-l10n-tools qtchooser python3-polib
 
     - name: Check that .po files are up to date
       run: |

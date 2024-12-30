@@ -19,6 +19,7 @@
 #include "settings.h"
 
 #include "escape_string.h"
+#include "gui_config.h"
 #include "rectangle_partitionner.h"
 #include "steam_app.h"
 #include "ui_settings.h"
@@ -46,6 +47,7 @@ const std::vector<std::pair<int, std::string>> encoder_ids{
         {1, "nvenc"},
         {2, "vaapi"},
         {3, "x264"},
+        {4, "vulkan"},
 };
 
 const std::vector<std::pair<int, std::string>> codec_ids{
@@ -73,6 +75,9 @@ const std::vector<std::pair<int, int>> compatible_combos{
         {2, 3},
         // x264
         {3, 1},
+        // vulkan
+        {4, 1},
+        // {4, 2},
 };
 
 int encoder_id_from_string(std::string_view s)
@@ -130,11 +135,6 @@ settings::settings(wivrn_server * server_interface) :
 	connect(ui->combo_select_game, &QComboBox::currentIndexChanged, this, &settings::on_selected_game_changed);
 	connect(ui->button_game_browse, &QPushButton::clicked, this, &settings::on_browse_game);
 
-	// Use a queued connection so that the slot is called after the widgets have been laid out
-	connect(ui->radio_manual_encoder, &QRadioButton::toggled, this, [&](bool value) {
-		if (value)
-			ui->scrollArea->ensureWidgetVisible(ui->layout_encoder_config); }, Qt::QueuedConnection);
-
 	connect(ui->partitionner, &rectangle_partitionner::selected_index_change, this, &settings::selected_rectangle_changed);
 
 	connect(ui->encoder, &QComboBox::currentIndexChanged, this, &settings::on_selected_encoder_changed);
@@ -148,6 +148,26 @@ settings::settings(wivrn_server * server_interface) :
 
 	fill_steam_games_list();
 	load_settings();
+
+	// Use a queued connection so that the slot is called after the widgets have been laid out
+	// Set up the signal connection after loading to avoid scrolling when opening the window
+	connect(ui->radio_manual_encoder, &QRadioButton::toggled, this, [&](bool value) {
+		if (value)
+			ui->scrollArea->ensureWidgetVisible(ui->layout_encoder_config); }, Qt::QueuedConnection);
+
+	auto encoders = dynamic_cast<QStandardItemModel *>(ui->encoder->model());
+#if !WIVRN_USE_NVENC
+	encoders->item(1)->setEnabled(false);
+#endif
+#if !WIVRN_USE_VAAPI
+	encoders->item(2)->setEnabled(false);
+#endif
+#if !WIVRN_USE_X264
+	encoders->item(3)->setEnabled(false);
+#endif
+#if !WIVRN_USE_VULKAN_ENCODE
+	encoders->item(4)->setEnabled(false);
+#endif
 
 	ui->partitionner->set_paint([&](QPainter & painter, QRect rect, const QVariant & data, int index, bool selected) {
 		QPalette palette = QApplication::palette();
@@ -208,7 +228,7 @@ void settings::on_selected_encoder_changed()
 {
 	int encoder = ui->encoder->currentIndex();
 
-	QStandardItemModel * model = qobject_cast<QStandardItemModel *>(ui->codec->model());
+	QStandardItemModel * model = dynamic_cast<QStandardItemModel *>(ui->codec->model());
 	assert(model);
 
 	for (int i = 0, n = model->rowCount(); i < n; i++)
@@ -264,6 +284,11 @@ void settings::on_encoder_settings_changed()
 	if (codec == 3 /* av1 */)
 	{
 		status += tr("Not all headsets and GPUs support AV1\n");
+	}
+
+	if (encoder == 4 /* vulkan */)
+	{
+		status += tr("Vulkan Video encoder is experimental\n");
 	}
 
 	ui->partitionner->set_rectangles_data(ui->partitionner->selected_index(), QVariant::fromValue(std::pair(encoder, codec)));

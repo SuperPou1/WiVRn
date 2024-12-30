@@ -17,6 +17,7 @@
  */
 
 #include "steam_app.h"
+#include "utils/flatpak.h"
 #include <QProcess>
 #include <algorithm>
 #include <cassert>
@@ -24,6 +25,7 @@
 #include <fstream>
 #include <iostream>
 #include <nlohmann/json.hpp>
+#include <string>
 
 namespace
 {
@@ -33,7 +35,7 @@ std::string read_vr_manifest()
 
 	std::filesystem::path vrmanifest = std::string{home ? home : ""} + "/.steam/steam/config/steamapps.vrmanifest";
 
-	if (std::filesystem::exists("/.flatpak-info"))
+	if (wivrn::flatpak_key(wivrn::flatpak::section::session_bus_policy, "org.freedesktop.Flatpak") == "talk")
 	{
 		QProcess flatpak_spawn;
 		flatpak_spawn.start("flatpak-spawn", {"--host", "cat", QString::fromStdString(vrmanifest)});
@@ -90,7 +92,11 @@ std::vector<steam_app> steam_apps(const std::string & locale)
 
 				const char prefix[] = "steam.app.";
 				if (app_key.starts_with(prefix))
-					app.url = "steam://rungameid/" + app_key.substr(strlen(prefix));
+				{
+					// ¯\_(ツ)_/¯
+					uint64_t appkey = stoll(app_key.substr(strlen(prefix)));
+					app.url = "steam://rungameid/" + std::to_string((appkey << 32) + 0x2000000);
+				}
 			}
 
 			if (app.url != "")

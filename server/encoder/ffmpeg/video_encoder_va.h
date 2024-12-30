@@ -32,7 +32,7 @@ namespace wivrn
 struct encoder_settings;
 struct wivrn_vk_bundle;
 
-class video_encoder_va : public VideoEncoderFFMPEG
+class video_encoder_va : public video_encoder_ffmpeg
 {
 	struct in_t
 	{
@@ -48,9 +48,9 @@ class video_encoder_va : public VideoEncoderFFMPEG
 	bool synchronization2 = false;
 
 public:
-	video_encoder_va(wivrn_vk_bundle &, wivrn::encoder_settings & settings, float fps);
+	video_encoder_va(wivrn_vk_bundle &, wivrn::encoder_settings & settings, float fps, uint8_t stream_index);
 
-	void present_image(vk::Image y_cbcr, vk::raii::CommandBuffer & cmd_buf, uint8_t slot) override;
+	std::pair<bool, vk::Semaphore> present_image(vk::Image y_cbcr, vk::raii::CommandBuffer & cmd_buf, uint8_t slot, uint64_t frame_index) override;
 
 protected:
 	void push_frame(bool idr, std::chrono::steady_clock::time_point pts, uint8_t slot) override;

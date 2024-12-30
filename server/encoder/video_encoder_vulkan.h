@@ -26,7 +26,7 @@
 
 namespace wivrn
 {
-class video_encoder_vulkan : public VideoEncoder
+class video_encoder_vulkan : public video_encoder
 {
 	wivrn_vk_bundle & vk;
 	const vk::VideoEncodeCapabilitiesKHR encode_caps;
@@ -35,14 +35,25 @@ class video_encoder_vulkan : public VideoEncoder
 	vk::raii::VideoSessionParametersKHR video_session_parameters = nullptr;
 
 	vk::raii::QueryPool query_pool = nullptr;
-
-	buffer_allocation output_buffer;
-	size_t output_buffer_size;
+	vk::raii::CommandPool transfer_command_pool = nullptr;
+	vk::raii::CommandPool video_command_pool = nullptr;
 
 	vk::ImageViewUsageCreateInfo image_view_template_next;
 	vk::ImageViewCreateInfo image_view_template;
 	std::unordered_map<VkImage, vk::raii::ImageView> image_views; // for input images
-	std::array<vk::Fence, num_slots> fences;
+	struct slot_item
+	{
+		image_allocation tmp_image; // Used if we have an offset in the image to encode
+		vk::raii::CommandBuffer video_cmd_buf = nullptr;
+		vk::raii::CommandBuffer transfer_cmd_buf = nullptr;
+		vk::raii::Semaphore wait_sem = nullptr;
+		vk::raii::Semaphore sem = nullptr;
+		vk::raii::Fence fence = nullptr;
+		vk::raii::ImageView view = nullptr;
+		buffer_allocation output_buffer;
+		buffer_allocation host_buffer;
+	};
+	std::array<slot_item, num_slots> slot_data;
 
 	image_allocation dpb_image;
 
@@ -75,7 +86,12 @@ protected:
 	const uint8_t num_dpb_slots = 5;
 	std::optional<vk::VideoEncodeRateControlInfoKHR> rate_control;
 
-	video_encoder_vulkan(wivrn_vk_bundle & vk, vk::Rect2D rect, vk::VideoEncodeCapabilitiesKHR encode_caps, float fps, uint64_t bitrate);
+	video_encoder_vulkan(wivrn_vk_bundle & vk,
+	                     vk::Rect2D rect,
+	                     vk::VideoEncodeCapabilitiesKHR encode_caps,
+	                     float fps,
+	                     uint8_t stream_idx,
+	                     const encoder_settings & settings);
 
 	void init(const vk::VideoCapabilitiesKHR & video_caps,
 	          const vk::VideoProfileInfoKHR & video_profile,
@@ -94,7 +110,8 @@ protected:
 
 public:
 	std::optional<data> encode(bool idr, std::chrono::steady_clock::time_point target_timestamp, uint8_t slot) override;
-	void present_image(vk::Image y_cbcr, vk::raii::CommandBuffer & cmd_buf, vk::Fence, uint8_t slot, uint64_t frame_index) override;
+	std::pair<bool, vk::Semaphore> present_image(vk::Image y_cbcr, vk::raii::CommandBuffer & cmd_buf, uint8_t slot, uint64_t frame_index) override;
+	void post_submit(uint8_t slot) override;
 	void on_feedback(const from_headset::feedback &) override;
 };
 } // namespace wivrn

@@ -18,6 +18,11 @@
  */
 #pragma once
 
+#include "xr/space.h"
+#include <glm/glm.hpp>
+#include <glm/gtc/quaternion.hpp>
+#include <string>
+#include <utility>
 #include <openxr/openxr.h>
 
 enum class model
@@ -26,6 +31,7 @@ enum class model
 	oculus_quest_2,
 	meta_quest_pro,
 	meta_quest_3,
+	meta_quest_3s,
 	pico_neo_3,
 	pico_4,
 	htc_vive_focus_3,
@@ -43,10 +49,15 @@ enum class feature
 };
 
 model guess_model();
+std::string model_name();
 
-XrViewConfigurationView override_view(XrViewConfigurationView, model);
+XrViewConfigurationView override_view(XrViewConfigurationView, model = guess_model());
 
 bool need_srgb_conversion(model);
 
 // Return nullptr if no permission is required
 const char * permission_name(feature f);
+
+std::string controller_name();
+std::string controller_ray_model_name();
+std::pair<glm::vec3, glm::quat> controller_offset(std::string_view profile, xr::spaces space);

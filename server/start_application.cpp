@@ -9,8 +9,8 @@
 #include "start_application.h"
 
 #include "driver/configuration.h"
+#include "utils/flatpak.h"
 
-#include <filesystem>
 #include <iomanip>
 #include <iostream>
 #include <stdlib.h>
@@ -35,7 +35,7 @@ static int get_service_pid(const std::string & service_name, pid_t & pid)
 
 	int ret = 0;
 
-	// Connect to the system bus
+	// Connect to the session bus
 	ret = sd_bus_open_user(&bus);
 	if (ret < 0)
 	{
@@ -235,7 +235,7 @@ int wivrn::exec_application(configuration config)
 	std::string executable;
 	std::vector<std::string> args;
 
-	if (std::filesystem::exists("/.flatpak-info"))
+	if (flatpak_key(flatpak::section::session_bus_policy, "org.freedesktop.Flatpak") == "talk")
 	{
 		executable = "flatpak-spawn";
 		args.push_back("flatpak-spawn");

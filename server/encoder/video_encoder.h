@@ -45,12 +45,12 @@ inline const char * encoder_vaapi = "vaapi";
 inline const char * encoder_x264 = "x264";
 inline const char * encoder_vulkan = "vulkan";
 
-class VideoEncoder
+class video_encoder
 {
 protected:
 	struct data
 	{
-		VideoEncoder * encoder;
+		video_encoder * encoder;
 		std::span<uint8_t> span;
 		std::shared_ptr<void> mem;
 	};
@@ -68,18 +68,19 @@ private:
 	public:
 		void push(data &&);
 		static std::shared_ptr<sender> get();
-		void wait_idle(VideoEncoder *);
+		void wait_idle(video_encoder *);
 	};
 
-protected:
-	uint8_t stream_idx;
+public:
+	const uint8_t stream_idx;
+	const to_headset::video_stream_description::channels_t channels;
 	static const uint8_t num_slots = 2;
 
 private:
 	std::mutex mutex;
 	std::array<std::atomic<bool>, num_slots> busy = {false, false};
-	uint8_t next_present = 0;
-	uint8_t next_encode = 0;
+	uint8_t present_slot = 0;
+	uint8_t encode_slot = 0;
 
 	// temporary data
 	wivrn_session * cnx;
@@ -98,7 +99,7 @@ private:
 	std::shared_ptr<sender> shared_sender;
 
 public:
-	static std::unique_ptr<VideoEncoder> Create(
+	static std::unique_ptr<video_encoder> create(
 	        wivrn_vk_bundle &,
 	        encoder_settings & settings,
 	        uint8_t stream_idx,
@@ -110,25 +111,26 @@ public:
 	static std::pair<std::vector<vk::VideoProfileInfoKHR>, vk::ImageUsageFlags> get_create_image_info(const std::vector<encoder_settings> &);
 #endif
 
-	VideoEncoder(bool async_send = false);
-	virtual ~VideoEncoder();
+	video_encoder(uint8_t stream_idx, to_headset::video_stream_description::channels_t channels, bool async_send);
+	virtual ~video_encoder();
 
-	void present_image(vk::Image y_cbcr, vk::raii::CommandBuffer & cmd_buf);
-	// for vulkan video (command buffer is on a video queue)
-	void present_image(vk::Image y_cbcr, vk::raii::CommandBuffer & cmd_buf, vk::Fence fence, uint64_t frame_index);
+	// return value: true if image should be transitioned to queue and layout for vulkan video encode
+	// semaphore to be signaled by the compositor
+	std::pair<bool, vk::Semaphore> present_image(vk::Image y_cbcr, vk::raii::CommandBuffer & cmd_buf, uint64_t frame_index);
+	void post_submit();
 
 	virtual void on_feedback(const from_headset::feedback &);
 	virtual void reset();
 
-	void Encode(wivrn_session & cnx,
+	void encode(wivrn_session & cnx,
 	            const to_headset::video_stream_data_shard::view_info_t & view_info,
 	            uint64_t frame_index);
 
 protected:
 	// called on present to submit command buffers for the image.
-	virtual void present_image(vk::Image y_cbcr, vk::raii::CommandBuffer & cmd_buf, uint8_t slot) {};
-	// for vulkan video (command buffer is on a video queue)
-	virtual void present_image(vk::Image y_cbcr, vk::raii::CommandBuffer & cmd_buf, vk::Fence, uint8_t slot, uint64_t frame_index) {};
+	virtual std::pair<bool, vk::Semaphore> present_image(vk::Image y_cbcr, vk::raii::CommandBuffer & cmd_buf, uint8_t slot, uint64_t frame_index) = 0;
+	// called after command buffer passed in present_image was submitted
+	virtual void post_submit(uint8_t slot) {}
 	// called when command buffer finished executing
 	virtual std::optional<data> encode(bool idr, std::chrono::steady_clock::time_point target_timestamp, uint8_t slot) = 0;
 

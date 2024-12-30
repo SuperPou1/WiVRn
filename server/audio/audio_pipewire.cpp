@@ -22,6 +22,7 @@
 #include "os/os_time.h"
 #include "util/u_logging.h"
 #include "utils/ring_buffer.h"
+#include <magic_enum.hpp>
 #include <memory>
 #include <pipewire/pipewire.h>
 #include <spa/param/audio/format-utils.h>
@@ -62,6 +63,7 @@ struct pipewire_device : public audio_device
 	std::unique_ptr<pw_stream, deleter> microphone;
 	pw_stream_events mic_events{
 	        .version = PW_VERSION_STREAM_EVENTS,
+	        .state_changed = &pipewire_device::mic_state_changed,
 	        .process = &pipewire_device::mic_process,
 	};
 	std::jthread thread;
@@ -73,6 +75,7 @@ struct pipewire_device : public audio_device
 
 	static void speaker_process(void * self_v);
 	static void mic_process(void * self_v);
+	static void mic_state_changed(void * self_v, pw_stream_state old, pw_stream_state state, const char * error);
 
 	void process_mic_data(wivrn::audio_data &&) override;
 
@@ -131,13 +134,14 @@ struct pipewire_device : public audio_device
 			};
 			const spa_pod * param = spa_format_audio_raw_build(&b, SPA_PARAM_EnumFormat, &info);
 
-			pw_stream_connect(
-			        speaker.get(),
-			        PW_DIRECTION_INPUT,
-			        PW_ID_ANY,
-			        pw_stream_flags(PW_STREAM_FLAG_AUTOCONNECT | PW_STREAM_FLAG_MAP_BUFFERS),
-			        &param,
-			        1);
+			if (pw_stream_connect(
+			            speaker.get(),
+			            PW_DIRECTION_INPUT,
+			            PW_ID_ANY,
+			            pw_stream_flags(PW_STREAM_FLAG_AUTOCONNECT | PW_STREAM_FLAG_MAP_BUFFERS),
+			            &param,
+			            1) < 0)
+				throw std::runtime_error("failed to connect speaker stream");
 			U_LOG_I("pipewire speaker stream created");
 		}
 
@@ -167,7 +171,6 @@ struct pipewire_device : public audio_device
 			                NULL),
 			        &mic_events,
 			        this));
-
 			std::vector<uint8_t> buffer(1024);
 			spa_pod_builder b = SPA_POD_BUILDER_INIT(buffer.data(), uint32_t(buffer.size()));
 
@@ -178,13 +181,14 @@ struct pipewire_device : public audio_device
 			};
 			const spa_pod * param = spa_format_audio_raw_build(&b, SPA_PARAM_EnumFormat, &info);
 
-			pw_stream_connect(
-			        microphone.get(),
-			        PW_DIRECTION_OUTPUT,
-			        PW_ID_ANY,
-			        pw_stream_flags(PW_STREAM_FLAG_AUTOCONNECT | PW_STREAM_FLAG_MAP_BUFFERS),
-			        &param,
-			        1);
+			if (pw_stream_connect(
+			            microphone.get(),
+			            PW_DIRECTION_OUTPUT,
+			            PW_ID_ANY,
+			            pw_stream_flags(PW_STREAM_FLAG_AUTOCONNECT | PW_STREAM_FLAG_MAP_BUFFERS),
+			            &param,
+			            1) < 0)
+				throw std::runtime_error("failed to connect microphone stream");
 			U_LOG_I("pipewire microphone stream created");
 		}
 
@@ -201,6 +205,7 @@ struct pipewire_device : public audio_device
 
 void pipewire_device::mic_process(void * self_v)
 {
+	// std::cerr << "mic_process" << std::endl;
 	auto self = (pipewire_device *)self_v;
 	auto buffer = pw_stream_dequeue_buffer(self->microphone.get());
 	if (not buffer)
@@ -263,7 +268,26 @@ void pipewire_device::mic_process(void * self_v)
 		if (not tmp)
 			break;
 		self->mic_buffer_size_bytes -= tmp->payload.size_bytes();
-		U_LOG_D("Audio sync: discard %ld bytes", tmp->payload.size_bytes());
+		U_LOG_D("Audio sync: discard %zd bytes", tmp->payload.size_bytes());
+	}
+}
+
+void pipewire_device::mic_state_changed(void * self_v, pw_stream_state old, pw_stream_state state, const char * error)
+{
+	auto self = (pipewire_device *)self_v;
+	switch (state)
+	{
+		case PW_STREAM_STATE_ERROR:
+			U_LOG_W("Error on microphone stream: %s", error);
+			return;
+		case PW_STREAM_STATE_UNCONNECTED:
+		case PW_STREAM_STATE_CONNECTING:
+		case PW_STREAM_STATE_PAUSED:
+			self->session.set_enabled(to_headset::tracking_control::id::microphone, false);
+			return;
+		case PW_STREAM_STATE_STREAMING:
+			self->session.set_enabled(to_headset::tracking_control::id::microphone, true);
+			return;
 	}
 }
 
@@ -281,15 +305,14 @@ void pipewire_device::speaker_process(void * self_v)
 	if (not data.data)
 		return;
 
-	audio_data packet{
-	        .timestamp = self->session.get_offset().to_headset(os_monotonic_get_ns()),
-	        .payload = std::span(
-	                (uint8_t *)data.data + data.chunk->offset,
-	                data.chunk->size),
-	};
 	try
 	{
-		self->session.send_control(packet);
+		self->session.send_control(audio_data{
+		        .timestamp = self->session.get_offset().to_headset(os_monotonic_get_ns()),
+		        .payload = std::span(
+		                (uint8_t *)data.data + data.chunk->offset,
+		                data.chunk->size),
+		});
 	}
 	catch (std::exception & e)
 	{

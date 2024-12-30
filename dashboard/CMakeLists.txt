@@ -1,18 +1,3 @@
-if (GIT_DESC)
-    configure_file(version.cpp.in version.cpp)
-else ()
-    add_custom_target(wivrn-dashboard-version ALL
-        COMMAND ${CMAKE_COMMAND}
-            -D GIT_EXECUTABLE=${GIT_EXECUTABLE}
-            -D INPUT_FILE=${CMAKE_CURRENT_SOURCE_DIR}/version.cpp.in
-            -D OUTPUT_FILE=${CMAKE_CURRENT_BINARY_DIR}/version.cpp
-            -D CMAKE_PROJECT_VERSION=${CMAKE_PROJECT_VERSION}
-            -P ${CMAKE_SOURCE_DIR}/cmake/GitVersion.cmake
-        BYPRODUCTS ${CMAKE_CURRENT_BINARY_DIR}/version.cpp
-        SOURCES ${CMAKE_CURRENT_SOURCE_DIR}/version.cpp.in
-        )
-endif()
-
 # Qt 6.7 changed qt_add_translations()
 try_compile(AT_LEAST_QT67 SOURCE_FROM_CONTENT check-qt-version.cpp "
 #include <QtGlobal>
@@ -29,6 +14,9 @@ qt_add_executable(wivrn-dashboard
         main_window.cpp
         main_window.h
         main_window.ui
+        manage_headsets.cpp
+        manage_headsets.h
+        manage_headsets.ui
         settings.cpp
         settings.h
         settings.ui
@@ -43,15 +31,24 @@ qt_add_executable(wivrn-dashboard
         steam_app.h
         adb.cpp
         adb.h
-        ${CMAKE_CURRENT_BINARY_DIR}/version.cpp
 )
 
+add_custom_command(OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/wivrn.png
+    COMMAND ${RSVG_CONVERT} ${CMAKE_CURRENT_SOURCE_DIR}/../images/wivrn.svg -w 540 -h 540 -o ${CMAKE_CURRENT_BINARY_DIR}/wivrn.png
+    DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/../images/wivrn.svg)
+
+add_custom_target(dashboard-assets ALL DEPENDS
+    ${CMAKE_CURRENT_BINARY_DIR}/wivrn.png
+)
+
+add_dependencies(wivrn-dashboard dashboard-assets)
+
 set_source_files_properties(${CMAKE_CURRENT_SOURCE_DIR}/../images/wivrn.svg PROPERTIES QT_RESOURCE_ALIAS "images/wivrn.svg")
-set_source_files_properties(${CMAKE_CURRENT_SOURCE_DIR}/../assets/wivrn.png PROPERTIES QT_RESOURCE_ALIAS "images/wivrn.png")
+set_source_files_properties(${CMAKE_CURRENT_BINARY_DIR}/wivrn.png           PROPERTIES QT_RESOURCE_ALIAS "images/wivrn.png")
 
 qt_add_resources(wivrn-dashboard wivrn-dashboard-resources PREFIX / FILES
     ${CMAKE_CURRENT_SOURCE_DIR}/../images/wivrn.svg
-    ${CMAKE_CURRENT_SOURCE_DIR}/../assets/wivrn.png
+    ${CMAKE_CURRENT_BINARY_DIR}/wivrn.png
 )
 
 set_source_files_properties(${CMAKE_CURRENT_SOURCE_DIR}/../dbus/io.github.wivrn.Server.xml PROPERTIES INCLUDE "${CMAKE_CURRENT_SOURCE_DIR}/wivrn_qdbus_types.h")
@@ -71,7 +68,11 @@ target_link_libraries(wivrn-dashboard PRIVATE
         Qt6::DBus
         Qt6::Network
         nlohmann_json
+        wivrn-common-base
+        Vulkan::Vulkan
 )
+
+target_compile_definitions(wivrn-dashboard PRIVATE JSON_DIAGNOSTICS=1)
 
 if (WIVRN_CHECK_CAPSYSNICE)
     target_link_libraries(wivrn-dashboard PRIVATE PkgConfig::libcap)

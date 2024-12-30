@@ -31,6 +31,7 @@
 #include <fastgltf/types.hpp>
 #include <fastgltf/util.hpp>
 #include <glm/gtc/type_ptr.hpp>
+#include <ranges>
 #include <spdlog/spdlog.h>
 #include <stdexcept>
 #include <type_traits>
@@ -469,11 +470,18 @@ public:
 		if (it != images.end())
 			return it->second;
 
-		auto [image_data, mime_type] = visit_source(gltf.images[index].data);
-		auto image = do_load_image(physical_device, device, queue, cb_pool, image_data, srgb);
+		try
+		{
+			auto [image_data, mime_type] = visit_source(gltf.images[index].data);
+			auto image = do_load_image(physical_device, device, queue, cb_pool, image_data, srgb);
 
-		images.emplace(index, image);
-		return image;
+			images.emplace(index, image);
+			return image;
+		}
+		catch (...)
+		{
+			return nullptr;
+		}
 	}
 
 	std::vector<std::shared_ptr<scene_data::texture>> load_all_textures()
@@ -492,7 +500,7 @@ public:
 
 		std::vector<std::shared_ptr<scene_data::texture>> textures;
 		textures.reserve(gltf.textures.size());
-		for (auto && [srgb, gltf_texture]: utils::zip(srgb_array, gltf.textures))
+		for (auto && [srgb, gltf_texture]: std::views::zip(srgb_array, gltf.textures))
 		{
 			auto & texture_ref = *textures.emplace_back(std::make_shared<scene_data::texture>());
 
@@ -721,6 +729,7 @@ public:
 			unsorted_objects[index].scale = glm::make_vec3(TRS.scale.data());
 			unsorted_objects[index].visible = true;
 			unsorted_objects[index].name = gltf_node.name;
+			std::ranges::fill(unsorted_objects[index].clipping_planes, glm::vec4{0, 0, 0, 1});
 		}
 
 		return unsorted_objects;
@@ -937,6 +946,35 @@ node_handle scene_data::find_node(node_handle root, std::string_view name)
 
 	// TODO custom exception
 	throw std::runtime_error("Node " + std::string(name) + " not found");
+}
+
+std::vector<node_handle> scene_data::find_children(node_handle root)
+{
+	assert(root.id < scene_nodes.size());
+	assert(root.scene == this);
+
+	std::vector<bool> flag(scene_nodes.size(), false);
+
+	flag[root.id] = true;
+
+	std::vector<node_handle> nodes;
+
+	for (size_t index = root.id; index < scene_nodes.size(); index++)
+	{
+		size_t parent = scene_nodes[index].parent_id;
+
+		if (parent == node::root_id)
+			continue;
+
+		if (!flag[parent])
+			continue;
+
+		nodes.emplace_back(index, this);
+
+		flag[index] = true;
+	}
+
+	return nodes;
 }
 
 std::shared_ptr<scene_data::material> scene_data::find_material(std::string_view name)

@@ -27,21 +27,40 @@
 #include <optional>
 #include <poll.h>
 #include <stdexcept>
+#include <stop_token>
 #include <system_error>
 
 namespace wivrn
 {
+class incorrect_pin : public std::runtime_error
+{
+public:
+	incorrect_pin();
+};
 
 class wivrn_connection
 {
+public:
+	enum class encryption_state
+	{
+		disabled,
+		enabled,
+		pairing,
+	};
+
+private:
 	typed_socket<TCP, from_headset::packets, to_headset::packets> control;
 	typed_socket<UDP, from_headset::packets, to_headset::packets> stream;
 	std::atomic<bool> active = false;
+	std::string pin;
+	encryption_state state;
 
-	void init();
+	wivrn::from_headset::headset_info_packet info_packet;
+
+	void init(std::stop_token stop_token, std::function<void()> tick = []() {});
 
 public:
-	wivrn_connection(TCP && tcp);
+	wivrn_connection(std::stop_token stop_token, encryption_state state, std::string pin, TCP && tcp);
 	wivrn_connection(const wivrn_connection &) = delete;
 	wivrn_connection & operator=(const wivrn_connection &) = delete;
 
@@ -49,7 +68,8 @@ public:
 	{
 		return active;
 	}
-	void reset(TCP && tcp);
+	void reset(TCP && tcp, std::function<void()> tick = []() {});
+	void shutdown();
 
 	template <typename T>
 	void send_control(T && packet)
@@ -65,15 +85,19 @@ public:
 			throw;
 		}
 	}
+
 	template <typename T>
 	void send_stream(T && packet)
 	{
 		try
 		{
-			if (active and stream)
-				stream.send(std::forward<T>(packet));
-			else
-				control.send(std::forward<T>(packet));
+			if (active)
+			{
+				if (stream)
+					stream.send(std::forward<T>(packet));
+				else
+					control.send(std::forward<T>(packet));
+			}
 		}
 		catch (...)
 		{
@@ -83,6 +107,11 @@ public:
 	}
 
 	std::optional<from_headset::packets> poll_control(int timeout);
+
+	const wivrn::from_headset::headset_info_packet & info() const
+	{
+		return info_packet;
+	}
 
 	template <typename T>
 	int poll(T && visitor, int timeout)

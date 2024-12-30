@@ -24,9 +24,11 @@
 #include "application.h"
 #include "imgui_internal.h"
 #include "implot.h"
+#include "utils/i18n.h"
 #include "utils/ranges.h"
 #include <cmath>
 #include <limits>
+#include <ranges>
 #include <spdlog/spdlog.h>
 
 namespace
@@ -96,20 +98,30 @@ void scenes::stream::accumulate_metrics(XrTime predicted_display_time, const std
 	global_metrics[metrics_offset].bandwidth_rx = bandwidth_rx * 8;
 	global_metrics[metrics_offset].bandwidth_tx = bandwidth_tx * 8;
 
-	if (decoder_metrics.size() != blit_handles.size())
-		decoder_metrics.resize(blit_handles.size());
+	std::vector<shard_accumulator::blit_handle *> active_handles;
+	active_handles.reserve(blit_handles.size());
+	for (const auto & h: blit_handles)
+	{
+		if (h)
+			active_handles.push_back(h.get());
+	}
 
-	auto min_encode_begin = std::numeric_limits<decltype(blit_handles[0]->timing_info.encode_begin)>::max();
-	for (const auto & bh: blit_handles)
+	if (decoder_metrics.size() != active_handles.size())
+		decoder_metrics.resize(active_handles.size());
+
+	auto min_encode_begin = std::numeric_limits<decltype(active_handles[0]->timing_info.encode_begin)>::max();
+	for (const auto & bh: active_handles)
 	{
 		if (bh)
 			min_encode_begin = std::min(min_encode_begin, bh->timing_info.encode_begin);
 	}
 
-	for (auto && [metrics, bh]: utils::zip(decoder_metrics, blit_handles))
+	for (auto && [metrics, bh]: std::views::zip(decoder_metrics, active_handles))
 	{
 		if (metrics.size() != global_metrics.size())
 			metrics.resize(global_metrics.size());
+		if (not bh)
+			continue;
 
 		// clang-format off
 		metrics[metrics_offset] = bh ? decoder_metric{
@@ -131,7 +143,7 @@ void scenes::stream::accumulate_metrics(XrTime predicted_display_time, const std
 	metrics_offset = (metrics_offset + 1) % global_metrics.size();
 }
 
-XrCompositionLayerQuad scenes::stream::plot_performance_metrics(XrTime predicted_display_time)
+std::vector<XrCompositionLayerQuad> scenes::stream::plot_performance_metrics(XrTime predicted_display_time)
 {
 	imgui_ctx->new_frame(predicted_display_time);
 	const ImGuiStyle & style = ImGui::GetStyle();
@@ -149,12 +161,12 @@ XrCompositionLayerQuad scenes::stream::plot_performance_metrics(XrTime predicted
 	        plot(_("GPU time"), {{_("Reproject"), &global_metric::gpu_time},
 		                     {_("Blit"),      &global_metric::gpu_barrier}},  "s"),
 
-	        plot(("Network"),  {{_("Download"),  &global_metric::bandwidth_rx},
+	        plot(_("Network"), {{_("Download"),  &global_metric::bandwidth_rx},
 	                            {_("Upload"),    &global_metric::bandwidth_tx}}, "bit/s"),
 	        // clang-format on
 	};
 
-	int n_plots = plots.size() + decoders.size();
+	int n_plots = plots.size() + decoder_metrics.size();
 	axis_scale.resize(n_plots);
 
 	int n_cols = 2;
@@ -319,5 +331,9 @@ XrCompositionLayerQuad scenes::stream::plot_performance_metrics(XrTime predicted
 	}
 	ImGui::End();
 
-	return imgui_ctx->end_frame();
+	std::vector<XrCompositionLayerQuad> layers;
+	for (auto & layer: imgui_ctx->end_frame())
+		layers.push_back(layer.second);
+
+	return layers;
 }

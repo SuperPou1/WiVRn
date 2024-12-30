@@ -6,7 +6,7 @@
 
 WiVRn wirelessly connects a standalone VR headset to a Linux computer. You can then play PCVR games on the headset while processing is done on the computer.
 
-It supports a wide range of headsets such as Quest 1 / 2 / Pro / 3, Pico Neo 3 / 4, HTC Vive Focus 3, HTC Vive XR elite and most other Android based headsets.
+It supports a wide range of headsets such as Quest 1 / 2 / Pro / 3 / 3S, Pico Neo 3 / 4, HTC Vive Focus 3, HTC Vive XR elite and most other Android based headsets.
 
 # Getting started
 
@@ -19,6 +19,7 @@ We recommend using the flatpak package from Flathub:
 
 Alternatively, packages are available:
 - [AUR for Arch](https://aur.archlinux.org/packages/wivrn-dashboard)
+- [Fedora](https://packages.fedoraproject.org/pkgs/wivrn/wivrn/)
 - [Guru for Gentoo](https://gitweb.gentoo.org/repo/proj/guru.git/tree/media-libs/wivrn).
 
 
@@ -92,6 +93,11 @@ If the server list is empty in the headset app:
 - If you have a firewall, check that port 9757 (UDP and TCP) is open
 - The server and client must be compatible:
 
+## How do I see server logs when using the dashboard?
+
+```
+journalctl -f --no-hostname -u io.github.wivrn.wivrn.desktop
+```
 
 
 # Credits

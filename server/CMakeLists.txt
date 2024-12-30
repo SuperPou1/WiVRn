@@ -25,15 +25,16 @@ set(XRT_BUILD_DRIVER_WMR                OFF)
 set(XRT_BUILD_DRIVER_XREAL_AIR          OFF)
 set(XRT_BUILD_SAMPLES                   OFF)
 
-set(XRT_FEATURE_COMPOSITOR_NULL          OFF)
-set(XRT_FEATURE_SERVICE                  ON)
-set(XRT_FEATURE_SERVICE_SYSTEMD          OFF)
-set(XRT_FEATURE_SLAM                     OFF)
-set(XRT_FEATURE_STEAMVR_PLUGIN           OFF)
-set(XRT_FEATURE_WINDOW_PEEK              OFF)
-set(XRT_FEATURE_OPENXR_FACE_TRACKING2_FB ON)
-set(XRT_FEATURE_OPENXR_HAND_TRACKING_EXT ON)
-set(XRT_FEATURE_RENDERDOC                ${WIVRN_FEATURE_RENDERDOC})
+set(XRT_FEATURE_COMPOSITOR_NULL                   OFF)
+set(XRT_FEATURE_SERVICE                           ON)
+set(XRT_FEATURE_SERVICE_SYSTEMD                   OFF)
+set(XRT_FEATURE_SLAM                              OFF)
+set(XRT_FEATURE_STEAMVR_PLUGIN                    OFF)
+set(XRT_FEATURE_WINDOW_PEEK                       OFF)
+set(XRT_FEATURE_OPENXR_FACE_TRACKING2_FB          ON)
+set(XRT_FEATURE_OPENXR_HAND_TRACKING_EXT          ON)
+set(XRT_FEATURE_OPENXR_ACTIVE_ACTION_SET_PRIORITY ON)
+set(XRT_FEATURE_RENDERDOC                         ${WIVRN_FEATURE_RENDERDOC})
 
 set(XRT_FEATURE_OPENXR_INTERACTION_EXT_PALM_POSE ON)
 
@@ -45,6 +46,7 @@ set(XRT_HAVE_SDL2                    OFF)
 set(XRT_HAVE_OPENCV                  OFF)
 set(XRT_HAVE_DBUS                    OFF)
 set(XRT_HAVE_LIBUDEV                 OFF)
+set(XRT_HAVE_ONNXRUNTIME             OFF)
 
 set(XRT_HAVE_SYSTEMD ${WIVRN_USE_SYSTEMD})
 set(XRT_INSTALL_SYSTEMD_UNIT_FILES   OFF)
@@ -66,6 +68,7 @@ add_executable(wivrn-server
 		avahi_publisher.cpp
 		hostname.cpp
 		main.cpp
+		sleep_inhibitor.cpp
 		start_application.cpp
 		target_instance_wivrn.cpp
 		wivrn_ipc.cpp
@@ -166,7 +169,7 @@ endif()
 
 # Generate dbus interface code as a separate target to avoid warnings in generated code
 add_custom_command(OUTPUT wivrn_server_dbus.c wivrn_server_dbus.h
-		   COMMAND gdbus-codegen ${CMAKE_CURRENT_SOURCE_DIR}/../dbus/io.github.wivrn.Server.xml --interface-prefix io.github.wivrn --generate-c-code wivrn_server_dbus --c-namespace Wivrn
+		   COMMAND ${GDBUS_CODEGEN} ${CMAKE_CURRENT_SOURCE_DIR}/../dbus/io.github.wivrn.Server.xml --interface-prefix io.github.wivrn --generate-c-code wivrn_server_dbus --c-namespace Wivrn
 		   DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/../dbus/io.github.wivrn.Server.xml)
 add_custom_target(wivrn-server-dbus-codegen ALL DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/wivrn_server_dbus.c ${CMAKE_CURRENT_BINARY_DIR}/wivrn_server_dbus.h)
 add_library(wivrn-server-dbus STATIC
@@ -177,6 +180,7 @@ target_include_directories(wivrn-server-dbus PUBLIC ${CMAKE_CURRENT_BINARY_DIR})
 add_dependencies(wivrn-server-dbus wivrn-server-dbus-codegen)
 target_link_libraries(wivrn-server-dbus PUBLIC PkgConfig::glib2)
 target_link_libraries(wivrn-server PUBLIC wivrn-server-dbus)
+target_link_libraries(wivrn-server PUBLIC PkgConfig::libnotify)
 
 include(CompileGLSL)
 
@@ -202,6 +206,8 @@ target_link_libraries(
 		nlohmann_json::nlohmann_json
 	)
 
+target_compile_definitions(wivrn-server PRIVATE JSON_DIAGNOSTICS=1)
+
 configure_file(dist/wivrn.service.in wivrn.service)
 install(FILES ${CMAKE_CURRENT_BINARY_DIR}/wivrn.service
 	DESTINATION lib/systemd/user/)
@@ -217,11 +223,14 @@ install(FILES dist/firewalld-wivrn.xml
 install(TARGETS wivrn-server)
 
 set_target_properties(${RUNTIME_TARGET} PROPERTIES EXCLUDE_FROM_ALL FALSE)
+set_target_properties(monado PROPERTIES OUTPUT_NAME "monado_wivrn")
+# Workaround as generate_openxr_runtime_manifest_at_install uses target name as library path
+add_library(monado_wivrn ALIAS monado)
 
 set(_extra_args)
-if(WIVRN_OPENXR_INSTALL_ABSOLUTE_RUNTIME_PATH)
+if (WIVRN_OPENXR_MANIFEST_TYPE STREQUAL "absolute")
 	set(_extra_args ABSOLUTE_RUNTIME_PATH)
-else()
+elseif (WIVRN_OPENXR_MANIFEST_TYPE STREQUAL "relative")
 	set(_extra_args RUNTIME_DIR_RELATIVE_TO_MANIFEST ../../../${CMAKE_INSTALL_LIBDIR}/wivrn)
 endif()
 
@@ -230,7 +239,7 @@ generate_openxr_runtime_manifest_at_install(
 	RUNTIME_TARGET ${RUNTIME_TARGET}
 	DESTINATION share/openxr/1
 	RELATIVE_RUNTIME_DIR ${CMAKE_INSTALL_LIBDIR}/wivrn
-	LIBMONADO monado
+	LIBMONADO monado_wivrn
 	)
 
 install(TARGETS ${RUNTIME_TARGET} monado

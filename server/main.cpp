@@ -6,14 +6,19 @@
  */
 
 #include "openxr/openxr.h"
+#include "sleep_inhibitor.h"
 #include "util/u_trace_marker.h"
 
 #include "active_runtime.h"
 #include "avahi_publisher.h"
 #include "driver/configuration.h"
+#include "driver/wivrn_connection.h"
 #include "exit_codes.h"
 #include "hostname.h"
+#include "protocol_version.h"
 #include "start_application.h"
+#include "utils/flatpak.h"
+#include "utils/overloaded.h"
 #include "version.h"
 #include "wivrn_config.h"
 #include "wivrn_ipc.h"
@@ -24,19 +29,24 @@
 
 #include <CLI/CLI.hpp>
 #include <avahi-glib/glib-watch.h>
+#include <chrono> // IWYU pragma: keep
 #include <filesystem>
 #include <iostream>
 #include <iterator>
+#include <libnotify/notification.h>
 #include <memory>
 #include <poll.h>
+#include <random>
 #include <sys/signalfd.h>
 #include <sys/un.h>
 #include <sys/wait.h>
+#include <thread>
 #include <unistd.h>
 
 #include <gio/gio.h>
 #include <glib-unix.h>
 #include <glib.h>
+#include <libnotify/notify.h>
 
 #include <shared/ipc_protocol.h>
 #include <util/u_file.h>
@@ -53,6 +63,7 @@ extern "C"
 }
 
 using namespace wivrn;
+using namespace std::chrono_literals;
 
 static std::unique_ptr<TCPListener> listener;
 std::optional<wivrn::typed_socket<wivrn::UnixDatagram, from_monado::packets, to_monado::packets>> wivrn_ipc_socket_main_loop;
@@ -75,7 +86,8 @@ int create_listen_socket()
 	addr.sun_family = AF_UNIX;
 	strcpy(addr.sun_path, sock_file.c_str());
 
-	int fd = socket(PF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
+	int fd = socket(PF_UNIX, SOCK_STREAM, 0);
+	fcntl(fd, F_SETFD, FD_CLOEXEC);
 	int ret = bind(fd, (struct sockaddr *)&addr, sizeof(addr));
 
 	// no other instance is running, or we would have never arrived here
@@ -130,19 +142,13 @@ void display_child_status(int wstatus, const std::string & name)
 
 static std::filesystem::path flatpak_app_path()
 {
-	const std::string key("app-path=");
-	std::string line;
-	std::ifstream info("/.flatpak-info");
-	while (std::getline(info, line))
+	if (auto value = flatpak_key(flatpak::section::instance, "app-path"))
 	{
-		if (line.starts_with(key))
-		{
-			std::filesystem::path path = line.substr(key.size());
-			while (path != "" and path != path.parent_path() and path.filename() != "io.github.wivrn.wivrn")
-				path = path.parent_path();
+		std::filesystem::path path = *value;
+		while (path != "" and path != path.parent_path() and path.filename() != "io.github.wivrn.wivrn")
+			path = path.parent_path();
 
-			return path;
-		}
+		return path;
 	}
 
 	return "/";
@@ -151,17 +157,26 @@ static std::filesystem::path flatpak_app_path()
 static std::string steam_command()
 {
 	std::string pressure_vessel_filesystems_rw = "$XDG_RUNTIME_DIR/" XRT_IPC_MSG_SOCK_FILENAME;
+	std::string vr_override;
 
 	// Check if in a flatpak
-	if (std::filesystem::exists("/.flatpak-info"))
+	if (is_flatpak())
 	{
 		std::string app_path = flatpak_app_path().string();
 		// /usr and /var are remapped by steam
-		if (app_path.starts_with("/usr") or app_path.starts_with("/var"))
+		if (app_path.starts_with("/var"))
 			pressure_vessel_filesystems_rw += ":" + app_path;
 	}
+	else if (auto p = active_runtime::opencomposite_path().string(); not p.empty())
+	{
+		// /usr cannot be shared in pressure vessel container
+		if (p.starts_with("/usr"))
+			vr_override = " VR_OVERRIDE=/run/host" + p;
+		else if (p.starts_with("/var"))
+			pressure_vessel_filesystems_rw += ":" + p;
+	}
 
-	std::string command = "PRESSURE_VESSEL_FILESYSTEMS_RW=" + pressure_vessel_filesystems_rw + " %command%";
+	std::string command = "PRESSURE_VESSEL_FILESYSTEMS_RW=" + pressure_vessel_filesystems_rw + vr_override + " %command%";
 
 	if (auto p = active_runtime::manifest_path().string(); p.starts_with("/usr"))
 		command = "XR_RUNTIME_JSON=/run/host" + p + " " + command;
@@ -181,6 +196,7 @@ bool use_systemd;
 guint server_watch;
 guint server_kill_watch;
 pid_t server_pid;
+std::optional<std::jthread> connection_thread;
 
 guint app_watch;
 guint app_kill_watch;
@@ -188,9 +204,19 @@ pid_t app_pid;
 
 bool quitting_main_loop;
 bool do_fork;
+bool do_active_runtime;
 bool avahi_publish;
 
 guint listener_watch;
+
+wivrn_connection::encryption_state enc_state = wivrn_connection::encryption_state::enabled;
+guint pairing_timeout;
+std::string pin;
+NotifyNotification * pin_notification;
+
+// Delay until the next connection is allowed, increased after each incorrect attempt
+const std::chrono::milliseconds default_delay_next_try = 10ms;
+std::chrono::milliseconds delay_next_try = default_delay_next_try;
 
 WivrnServer * dbus_server;
 
@@ -198,10 +224,13 @@ WivrnServer * dbus_server;
  */
 std::optional<active_runtime> runtime_setter;
 std::optional<avahi_publisher> publisher;
+std::optional<sleep_inhibitor> inhibitor;
 
 gboolean headset_connected(gint fd, GIOCondition condition, gpointer user_data);
 void stop_listening();
 void on_headset_info_packet(const wivrn::from_headset::headset_info_packet & info);
+void expose_known_keys_on_dbus();
+void set_encryption_state(wivrn_connection::encryption_state new_enc_state);
 
 void start_publishing();
 void stop_publishing();
@@ -239,8 +268,6 @@ void start_app()
 
 void start_server()
 {
-	stop_listening();
-	stop_publishing();
 	server_pid = do_fork ? fork() : 0;
 
 	if (server_pid < 0)
@@ -257,8 +284,6 @@ void start_server()
 			close(stdin_pipe_fds[0]);
 			close(stdin_pipe_fds[1]);
 		}
-
-		setenv("LISTEN_PID", std::to_string(getpid()).c_str(), true);
 
 		// In most cases there is no server-side reprojection and
 		// there is no need for oversampling.
@@ -302,7 +327,8 @@ void start_server()
 			update_fsm(); }, nullptr);
 	}
 
-	runtime_setter.emplace();
+	if (do_active_runtime)
+		runtime_setter.emplace();
 }
 
 void kill_app()
@@ -318,7 +344,6 @@ void kill_app()
 
 void kill_server()
 {
-	// FIXME: server doesn't listen on stdin when used in socket activation mode
 	// Write to the server's stdin to make it quit
 	char buffer[] = "\n";
 	if (write(stdin_pipe_fds[1], &buffer, strlen(buffer)) < 0)
@@ -359,11 +384,13 @@ void stop_listening()
 
 void start_publishing()
 {
+	if (not avahi_publish)
+		return;
 	if (publisher)
 		return;
 
 	char protocol_string[17];
-	sprintf(protocol_string, "%016lx", wivrn::protocol_version);
+	sprintf(protocol_string, "%016" PRIx64, wivrn::protocol_version);
 	std::map<std::string, std::string> TXT = {
 	        {"protocol", protocol_string},
 	        {"version", wivrn::git_version},
@@ -379,11 +406,13 @@ void stop_publishing()
 
 void update_fsm()
 {
-	bool server_running = server_watch != 0;
+	bool server_running = server_watch != 0 or connection_thread;
 	bool app_running = app_watch != 0;
 
 	if (quitting_main_loop)
 	{
+		connection_thread.reset();
+
 		if (server_running)
 			kill_server();
 
@@ -402,9 +431,11 @@ void update_fsm()
 		{
 			runtime_setter.reset();
 
-			start_listening();
-			start_publishing();
-			wivrn_server_set_headset_connected(dbus_server, false);
+			g_timeout_add(delay_next_try.count(), [](void *) {
+				start_listening();
+				start_publishing();
+				wivrn_server_set_headset_connected(dbus_server, false);
+				return G_SOURCE_REMOVE; }, 0);
 		}
 	}
 }
@@ -420,22 +451,83 @@ int sigint(void * sig_nr)
 	return G_SOURCE_CONTINUE;
 }
 
-gboolean headset_connected(gint fd, GIOCondition condition, gpointer user_data)
+gboolean headset_connected_success(void *)
 {
-	assert(server_watch == 0);
-	assert(app_watch == 0);
+	assert(connection_thread);
+	connection_thread.reset();
 
-	assert(listener);
+	if (enc_state == wivrn_connection::encryption_state::pairing)
+		set_encryption_state(wivrn_connection::encryption_state::enabled);
 
-	tcp = std::make_unique<wivrn::TCP>(listener->accept().first);
 	init_cleanup_functions();
 
 	std::cout << "Client connected" << std::endl;
 
+	expose_known_keys_on_dbus();
+
 	start_server();
 	start_app();
 
-	return true;
+	delay_next_try = default_delay_next_try;
+
+	connection.reset();
+	return G_SOURCE_REMOVE;
+}
+
+gboolean headset_connected_failed(void *)
+{
+	assert(connection_thread);
+	connection_thread.reset();
+
+	update_fsm();
+	return G_SOURCE_REMOVE;
+}
+
+gboolean headset_connected_incorrect_pin(void *)
+{
+	assert(connection_thread);
+	connection_thread.reset();
+
+	delay_next_try = 2 * delay_next_try;
+	std::cout << "Waiting " << delay_next_try << " until the next attempt is allowed" << std::endl;
+
+	update_fsm();
+	return G_SOURCE_REMOVE;
+}
+
+gboolean headset_connected(gint fd, GIOCondition condition, gpointer user_data)
+{
+	assert(server_watch == 0);
+	assert(app_watch == 0);
+	assert(not connection_thread);
+	assert(listener);
+
+	TCP tcp = listener->accept().first;
+	stop_listening();
+	stop_publishing();
+
+	connection_thread.emplace([](std::stop_token stop_token, TCP && tcp, std::string pin, wivrn_connection::encryption_state enc_state) {
+		try
+		{
+			connection = std::make_unique<wivrn_connection>(stop_token, enc_state, pin, std::move(tcp));
+			g_main_context_invoke(nullptr, &headset_connected_success, nullptr);
+		}
+		catch (wivrn::incorrect_pin &)
+		{
+			std::cerr << "Incorrect PIN" << std::endl;
+			g_main_context_invoke(nullptr, &headset_connected_incorrect_pin, nullptr);
+		}
+		catch (std::exception & e)
+		{
+			std::cerr << "Client connection failed: " << e.what() << std::endl;
+			g_main_context_invoke(nullptr, &headset_connected_failed, nullptr);
+		}
+	},
+	                          std::move(tcp),
+	                          pin,
+	                          enc_state);
+
+	return G_SOURCE_CONTINUE;
 }
 
 gboolean control_received(gint fd, GIOCondition condition, gpointer user_data)
@@ -443,45 +535,167 @@ gboolean control_received(gint fd, GIOCondition condition, gpointer user_data)
 	auto packet = wivrn_ipc_socket_main_loop->receive();
 	if (packet)
 	{
-		if (std::holds_alternative<wivrn::from_headset::headset_info_packet>(*packet))
-		{
-			on_headset_info_packet(std::get<wivrn::from_headset::headset_info_packet>(*packet));
-			wivrn_server_set_headset_connected(dbus_server, true);
-		}
-		else if (std::holds_alternative<from_monado::headsdet_connected>(*packet))
-		{
-			stop_publishing();
-			wivrn_server_set_headset_connected(dbus_server, true);
-		}
-		else if (std::holds_alternative<from_monado::headsdet_disconnected>(*packet))
-		{
-			start_publishing();
-			wivrn_server_set_headset_connected(dbus_server, false);
-		}
+		std::visit(utils::overloaded{
+		                   [&](const wivrn::from_headset::headset_info_packet & info) {
+			                   on_headset_info_packet(std::get<wivrn::from_headset::headset_info_packet>(*packet));
+			                   inhibitor.emplace();
+			                   wivrn_server_set_headset_connected(dbus_server, true);
+		                   },
+		                   [&](const from_monado::headset_connected &) {
+			                   stop_publishing();
+			                   inhibitor.emplace();
+			                   wivrn_server_set_headset_connected(dbus_server, true);
+		                   },
+		                   [&](const from_monado::headset_disconnected &) {
+			                   start_publishing();
+			                   inhibitor.reset();
+			                   wivrn_server_set_headset_connected(dbus_server, false);
+		                   },
+		           },
+		           *packet);
 	}
 
-	return true;
+	return G_SOURCE_CONTINUE;
 }
 
-gboolean
-on_handle_disconnect(WivrnServer * skeleton,
-                     GDBusMethodInvocation * invocation,
-                     gpointer user_data)
+void set_encryption_state(wivrn_connection::encryption_state new_enc_state)
+{
+	// TODO translate the notifications
+	if (pin_notification)
+	{
+		notify_notification_close(pin_notification, nullptr);
+		g_object_unref(G_OBJECT(pin_notification));
+		pin_notification = nullptr;
+	}
+
+	switch (new_enc_state)
+	{
+		case wivrn_connection::encryption_state::disabled:
+			pin = "";
+			std::cerr << "Encryption is disabled" << std::endl;
+			wivrn_server_set_pairing_enabled(dbus_server, false);
+			wivrn_server_set_encryption_enabled(dbus_server, false);
+
+			notify_notification_set_timeout(pin_notification, NOTIFY_EXPIRES_NEVER);
+			notify_notification_show(pin_notification, nullptr);
+			break;
+
+		case wivrn_connection::encryption_state::enabled:
+			pin = "";
+			if (enc_state != wivrn_connection::encryption_state::enabled)
+				std::cerr << "Headset pairing is disabled" << std::endl;
+
+			wivrn_server_set_pairing_enabled(dbus_server, false);
+			wivrn_server_set_encryption_enabled(dbus_server, true);
+			break;
+
+		case wivrn_connection::encryption_state::pairing:
+			std::random_device rd;
+			std::mt19937 gen(rd());
+			std::uniform_int_distribution<> distrib(0, 999999);
+
+			char buffer[7];
+			snprintf(buffer, 7, "%06d", distrib(gen));
+			pin = buffer;
+			std::cerr << "To pair a new headset use PIN code: " << pin << std::endl;
+			wivrn_server_set_pairing_enabled(dbus_server, true);
+			wivrn_server_set_encryption_enabled(dbus_server, true);
+
+			// Desktop notification
+			pin_notification = notify_notification_new("PIN", pin.c_str(), "dialog-password");
+			notify_notification_set_timeout(pin_notification, NOTIFY_EXPIRES_NEVER);
+			// TODO: notify_notification_set_image_from_pixbuf
+			notify_notification_show(pin_notification, nullptr);
+
+			break;
+	}
+
+	enc_state = new_enc_state;
+	wivrn_server_set_pin(dbus_server, pin.c_str());
+}
+
+gboolean on_handle_disconnect(WivrnServer * skeleton,
+                              GDBusMethodInvocation * invocation,
+                              gpointer user_data)
 {
 	wivrn_ipc_socket_main_loop->send(to_monado::disconnect{});
 
-	return true;
+	g_dbus_method_invocation_return_value(invocation, nullptr);
+	return G_SOURCE_CONTINUE;
 }
 
-gboolean
-on_handle_quit(WivrnServer * skeleton,
-               GDBusMethodInvocation * invocation,
-               gpointer user_data)
+gboolean on_handle_quit(WivrnServer * skeleton, GDBusMethodInvocation * invocation, gpointer user_data)
 {
 	quitting_main_loop = true;
 	update_fsm();
 
-	return true;
+	g_dbus_method_invocation_return_value(invocation, nullptr);
+	return G_SOURCE_CONTINUE;
+}
+
+gboolean on_handle_revoke_key(WivrnServer * skeleton, GDBusMethodInvocation * invocation, gpointer user_data)
+{
+	GVariant * args = g_dbus_method_invocation_get_parameters(invocation);
+
+	char * publickey;
+	g_variant_get_child(args, 0, "s", &publickey);
+
+	wivrn::remove_known_key(publickey);
+
+	g_free(publickey);
+
+	expose_known_keys_on_dbus();
+	g_dbus_method_invocation_return_value(invocation, nullptr);
+	return G_SOURCE_CONTINUE;
+}
+
+gboolean on_handle_rename_key(WivrnServer * skeleton, GDBusMethodInvocation * invocation, gpointer user_data)
+{
+	GVariant * args = g_dbus_method_invocation_get_parameters(invocation);
+
+	char * publickey;
+	char * name;
+	g_variant_get_child(args, 0, "s", &publickey);
+	g_variant_get_child(args, 1, "s", &name);
+
+	wivrn::rename_known_key({.public_key = publickey, .name = name});
+
+	g_free(publickey);
+	g_free(name);
+
+	expose_known_keys_on_dbus();
+	g_dbus_method_invocation_return_value(invocation, nullptr);
+	return G_SOURCE_CONTINUE;
+}
+
+gboolean on_handle_enable_pairing(WivrnServer * skeleton, GDBusMethodInvocation * invocation, gpointer user_data)
+{
+	set_encryption_state(wivrn_connection::encryption_state::pairing);
+
+	if (pairing_timeout)
+		g_source_remove(pairing_timeout);
+
+	int timeout_secs;
+	GVariant * args = g_dbus_method_invocation_get_parameters(invocation);
+	g_variant_get_child(args, 0, "i", &timeout_secs);
+
+	if (timeout_secs > 0)
+	{
+		pairing_timeout = g_timeout_add(timeout_secs * 1000, [](void *) {
+			pairing_timeout = 0;
+			set_encryption_state(wivrn_connection::encryption_state::enabled);
+			return G_SOURCE_REMOVE; }, nullptr);
+	}
+
+	g_dbus_method_invocation_return_value(invocation, g_variant_new("(s)", pin.c_str()));
+	return G_SOURCE_CONTINUE;
+}
+
+gboolean on_handle_disable_pairing(WivrnServer * skeleton, GDBusMethodInvocation * invocation, gpointer user_data)
+{
+	set_encryption_state(wivrn_connection::encryption_state::enabled);
+	g_dbus_method_invocation_return_value(invocation, nullptr);
+	return G_SOURCE_CONTINUE;
 }
 
 void on_json_configuration(WivrnServer * server, const GParamSpec * pspec, gpointer data)
@@ -500,6 +714,18 @@ void on_json_configuration(WivrnServer * server, const GParamSpec * pspec, gpoin
 
 	if (ec)
 		std::cerr << "Failed to save configuration: " << ec.message() << std::endl;
+}
+
+void expose_known_keys_on_dbus()
+{
+	GVariantBuilder * builder = g_variant_builder_new(G_VARIANT_TYPE("a(ss)"));
+	for (const auto & i: known_keys())
+	{
+		g_variant_builder_add(builder, "(ss)", i.name.c_str(), i.public_key.c_str());
+	}
+	GVariant * value = g_variant_new("a(ss)", builder);
+	g_variant_builder_unref(builder);
+	wivrn_server_set_known_keys(dbus_server, value);
 }
 
 void on_headset_info_packet(const wivrn::from_headset::headset_info_packet & info)
@@ -570,6 +796,29 @@ void on_name_acquired(GDBusConnection * connection, const gchar * name, gpointer
 	                 G_CALLBACK(on_handle_quit),
 	                 NULL);
 
+	g_signal_connect(dbus_server,
+	                 "handle-revoke-key",
+	                 G_CALLBACK(on_handle_revoke_key),
+	                 NULL);
+
+	g_signal_connect(dbus_server,
+	                 "handle-rename-key",
+	                 G_CALLBACK(on_handle_rename_key),
+	                 NULL);
+
+	if (enc_state != wivrn_connection::encryption_state::disabled)
+	{
+		g_signal_connect(dbus_server,
+		                 "handle-enable-pairing",
+		                 G_CALLBACK(on_handle_enable_pairing),
+		                 NULL);
+
+		g_signal_connect(dbus_server,
+		                 "handle-disable-pairing",
+		                 G_CALLBACK(on_handle_disable_pairing),
+		                 NULL);
+	}
+
 	wivrn_server_set_steam_command(dbus_server, steam_command().c_str());
 
 	on_headset_info_packet({});
@@ -579,12 +828,19 @@ void on_name_acquired(GDBusConnection * connection, const gchar * name, gpointer
 
 	wivrn_server_set_json_configuration(dbus_server, config.c_str());
 
+	expose_known_keys_on_dbus();
+
 	g_signal_connect(dbus_server, "notify::json-configuration", G_CALLBACK(on_json_configuration), NULL);
 
 	g_dbus_interface_skeleton_export(G_DBUS_INTERFACE_SKELETON(dbus_server),
 	                                 connection,
 	                                 "/io/github/wivrn/Server",
 	                                 NULL);
+
+	if (enc_state != wivrn_connection::encryption_state::disabled and known_keys().empty())
+		set_encryption_state(wivrn_connection::encryption_state::pairing);
+	else
+		set_encryption_state(enc_state);
 }
 
 } // namespace
@@ -637,8 +893,7 @@ int inner_main(int argc, char * argv[], bool show_instructions)
 	g_source_unref(control_listener);
 
 	// Initialize avahi publisher
-	if (avahi_publish)
-		start_publishing();
+	start_publishing();
 
 	// Initialize listener
 	start_listening();
@@ -657,10 +912,14 @@ int inner_main(int argc, char * argv[], bool show_instructions)
 	               nullptr,
 	               nullptr);
 
+	// Initialize libnotify
+	notify_init("WiVRn");
+
 	// Main loop
 	g_main_loop_run(main_loop);
 
 	// Cleanup
+	notify_uninit();
 	runtime_setter.reset();
 	stop_publishing();
 	stop_listening();
@@ -681,9 +940,11 @@ int main(int argc, char * argv[])
 
 	std::string config_file;
 	app.add_option("-f", config_file, "configuration file")->option_text("FILE")->check(CLI::ExistingFile);
+	auto no_active_runtime = app.add_flag("--no-manage-active-runtime")->description("don't set the active runtime on connection");
 	auto no_instructions = app.add_flag("--no-instructions")->group("");
 	auto no_fork = app.add_flag("--no-fork")->description("disable fork to serve connection")->group("Debug");
 	auto no_publish = app.add_flag("--no-publish-service")->description("disable publishing the service through avahi");
+	auto no_encrypt = app.add_flag("--no-encrypt")->description("disable encryption")->group("Debug");
 #if WIVRN_USE_SYSTEMD
 	// --application should only be used from wivrn-application unit file
 	auto app_flag = app.add_flag("--application")->group("");
@@ -692,8 +953,11 @@ int main(int argc, char * argv[])
 
 	CLI11_PARSE(app, argc, argv);
 
+	do_active_runtime = not *no_active_runtime;
 	do_fork = not *no_fork;
 	avahi_publish = not *no_publish;
+	if (*no_encrypt)
+		enc_state = wivrn_connection::encryption_state::disabled;
 
 	if (not config_file.empty())
 		configuration::set_config_file(config_file);

@@ -39,7 +39,7 @@ class settings : public QDialog
 	void selected_rectangle_changed(int);
 
 public:
-	settings(wivrn_server * server_interface = nullptr);
+	settings(wivrn_server * server_interface);
 	~settings();
 
 private:

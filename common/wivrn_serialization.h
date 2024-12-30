@@ -21,6 +21,7 @@
 
 #include "boost/pfr/core.hpp"
 #include "boost/pfr/tuple_size.hpp"
+#include "smp.h"
 #include <array>
 #include <boost/pfr.hpp>
 #include <chrono>
@@ -98,9 +99,29 @@ size_t serialized_size(const T & x)
 
 class deserialization_error : public std::runtime_error
 {
+	static std::string hexdump(std::span<uint8_t> raw_data)
+	{
+		std::string s;
+		char buf[10];
+
+		for (int i = 0; i < raw_data.size(); i += 16)
+		{
+			sprintf(buf, "%04x ", i);
+			s += buf;
+			for (int j = i; j < std::min<int>(raw_data.size(), i + 16); j++)
+			{
+				sprintf(buf, "%02x ", (int)raw_data[j]);
+				s += buf;
+			}
+			s += "\n";
+		}
+
+		return s;
+	}
+
 public:
-	deserialization_error() :
-	        std::runtime_error("Deserialization error") {}
+	deserialization_error(std::span<uint8_t> raw_data) :
+	        std::runtime_error("Deserialization error\n" + hexdump(raw_data)) {}
 };
 
 class serialization_packet
@@ -144,11 +165,11 @@ public:
 		serialization_traits<T>::serialize(value, *this);
 	}
 
-	operator const std::vector<std::span<uint8_t>> *()
+	operator std::vector<std::span<uint8_t>> *()
 	{
-		return &this->operator const std::vector<std::span<uint8_t>> &();
+		return &this->operator std::vector<std::span<uint8_t>> &();
 	}
-	operator const std::vector<std::span<uint8_t>> &()
+	operator std::vector<std::span<uint8_t>> &()
 	{
 		exp_spans.clear();
 		struct visitor
@@ -181,10 +202,12 @@ class deserialization_packet
 	std::span<uint8_t> buffer;
 
 public:
+	std::span<uint8_t> initial_buffer;
 	deserialization_packet() = default;
 	explicit deserialization_packet(std::shared_ptr<uint8_t[]> memory, std::span<uint8_t> buffer) :
 	        memory(memory),
-	        buffer(buffer)
+	        buffer(buffer),
+	        initial_buffer(buffer)
 	{}
 
 	void read(void * data, size_t size)
@@ -211,7 +234,7 @@ public:
 	void check_remaining_size(size_t min_size) const
 	{
 		if (min_size > buffer.size_bytes())
-			throw deserialization_error();
+			throw deserialization_error(initial_buffer);
 	}
 
 	template <typename T>
@@ -773,7 +796,7 @@ struct serialization_traits<std::variant<T...>>
 	{
 		uint8_t type_index = packet.deserialize<uint8_t>();
 		if (type_index >= sizeof...(T))
-			throw deserialization_error();
+			throw deserialization_error(packet.initial_buffer);
 
 		return deserialize_aux(packet, type_index, std::make_index_sequence<sizeof...(T)>());
 	}
@@ -881,11 +904,44 @@ struct serialization_traits<data_holder>
 	}
 };
 
+template <>
+struct serialization_traits<crypto::bignum>
+{
+	static constexpr void type_hash(details::hash_context & h)
+	{
+		h.feed("bignum");
+	}
+
+	static void serialize(const crypto::bignum & value, serialization_packet & packet)
+	{
+		serialization_traits<std::string>::serialize(value.to_data(), packet);
+	}
+
+	static crypto::bignum deserialize(deserialization_packet & packet)
+	{
+		return crypto::bignum::from_data(serialization_traits<std::string>::deserialize(packet));
+	}
+
+	static bool consteval is_trivially_serializable()
+	{
+		return false;
+	}
+
+	static size_t size(const crypto::bignum & value)
+	{
+		return 2 + value.data_size();
+	}
+};
+
 template <typename T>
-constexpr uint64_t serialization_type_hash()
+constexpr uint64_t serialization_type_hash(int revision)
 {
 	details::hash_context h;
 	serialization_traits<T>::type_hash(h);
+
+	if (revision)
+		h.feed(revision);
+
 	return h.hash;
 }
 

@@ -23,13 +23,16 @@
 #include <chrono>
 #include <cstdint>
 #include <netinet/in.h>
+#include <openssl/aes.h>
 #include <optional>
 #include <span>
+#include <string>
 #include <variant>
 #include <vector>
 #include <vulkan/vulkan_core.h>
 #include <openxr/openxr.h>
 
+#include "smp.h"
 #include "wivrn_serialization_types.h"
 
 namespace wivrn
@@ -37,6 +40,8 @@ namespace wivrn
 
 // Default port for server to listen, both TCP and UDP
 static const int default_port = 9757;
+
+static constexpr int protocol_revision = 0;
 
 enum class device_id : uint8_t
 {
@@ -95,6 +100,21 @@ struct audio_data
 
 namespace from_headset
 {
+struct crypto_handshake
+{
+	std::string public_key; // In PEM format
+	std::string name;
+};
+
+struct pin_check_1
+{
+	crypto::smp::msg1 message;
+};
+
+struct pin_check_3
+{
+	crypto::smp::msg3 message;
+};
 
 struct headset_info_packet
 {
@@ -114,6 +134,7 @@ struct headset_info_packet
 	bool eye_gaze;
 	bool face_tracking2_fb;
 	bool palm_pose;
+	bool passthrough;
 	std::vector<video_codec> supported_codecs; // from preferred to least preferred
 };
 
@@ -252,11 +273,35 @@ struct battery
 	bool charging;
 };
 
-using packets = std::variant<headset_info_packet, feedback, audio_data, handshake, tracking, trackings, hand_tracking, inputs, timesync_response, battery>;
+using packets = std::variant<crypto_handshake, pin_check_1, pin_check_3, headset_info_packet, feedback, audio_data, handshake, tracking, trackings, hand_tracking, inputs, timesync_response, battery>;
 } // namespace from_headset
 
 namespace to_headset
 {
+
+struct crypto_handshake
+{
+	enum class crypto_state : uint8_t
+	{
+		encryption_disabled,
+		pin_needed,
+		client_already_paired,
+		pairing_disabled,
+	};
+
+	std::string public_key; // In PEM format
+	crypto_state state;
+};
+
+struct pin_check_2
+{
+	crypto::smp::msg2 message;
+};
+
+struct pin_check_4
+{
+	crypto::smp::msg4 message;
+};
 
 struct handshake
 {
@@ -271,6 +316,7 @@ struct foveation_parameter_item
 	float a;
 	float b;
 };
+
 struct foveation_parameter
 {
 	foveation_parameter_item x;
@@ -290,6 +336,11 @@ struct audio_stream_description
 
 struct video_stream_description
 {
+	enum class channels_t
+	{
+		colour,
+		alpha,
+	};
 	struct item
 	{
 		// useful dimensions of the video stream
@@ -301,6 +352,8 @@ struct video_stream_description
 		uint16_t offset_x;
 		uint16_t offset_y;
 		video_codec codec;
+		channels_t channels;
+		uint8_t subsampling; // applies to width/height only, offsets are in full size pixels
 		std::optional<VkSamplerYcbcrRange> range;
 		std::optional<VkSamplerYcbcrModelConversion> color_model;
 	};
@@ -338,6 +391,8 @@ public:
 		std::array<XrPosef, 2> pose;
 		std::array<XrFovf, 2> fov;
 		std::array<foveation_parameter, 2> foveation;
+		// True when the frame contains an alpha channel
+		bool alpha;
 	};
 	std::optional<view_info_t> view_info;
 
@@ -384,15 +439,14 @@ struct tracking_control
 		right_hand,
 		face,
 		battery,
+		microphone,
 
-		last = battery,
+		last = microphone,
 	};
 	std::chrono::nanoseconds offset;
 	std::array<bool, size_t(id::last) + 1> enabled;
 };
 
-using packets = std::variant<handshake, audio_stream_description, video_stream_description, audio_data, video_stream_data_shard, haptics, timesync_query, tracking_control>;
-
+using packets = std::variant<crypto_handshake, pin_check_2, pin_check_4, handshake, audio_stream_description, video_stream_description, audio_data, video_stream_data_shard, haptics, timesync_query, tracking_control>;
 } // namespace to_headset
-
 } // namespace wivrn

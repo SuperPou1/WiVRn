@@ -21,6 +21,7 @@
 
 #include "utils/sync_queue.h"
 #include "wivrn_packets.h"
+#include <functional>
 #include <memory>
 #include <span>
 #include <thread>
@@ -84,6 +85,7 @@ public:
 
 private:
 	wivrn::to_headset::video_stream_description::item description;
+	uint8_t stream_index;
 	float fps;
 
 	vk::raii::Device & device;
