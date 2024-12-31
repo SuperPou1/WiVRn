@@ -364,6 +364,7 @@ index 000000000..b2426c117
 +
 +	if (hmd != NULL) {
 +		xrt_device_get_tracked_pose(hmd, name, at_timestamp_ns, out_relation);
++		return XRT_SUCCESS;
 +	} else {
 +		*out_relation = XRT_SPACE_RELATION_ZERO;
 +	}
@@ -697,8 +698,7 @@ index 000000000..b2426c117
 +		out_xdevs[tracker_count++] = &kt->joints[i]->base;
 +	}
 +
-+	return tracker_count;
-+}
++	return tracker_count;}
 diff --git a/src/xrt/drivers/kinect/kinect_device.h b/src/xrt/drivers/kinect/kinect_device.h
 new file mode 100644
 index 000000000..55414e347
